@@ -13,10 +13,10 @@ index a01c032..4d30725 100644
  # *DOCUMENTATION*
 diff --git a/XenGT-API.txt b/XenGT-API.txt
 new file mode 100644
-index 0000000..39d315d
+index 0000000..e552144
 --- /dev/null
 +++ b/XenGT-API.txt
-@@ -0,0 +1,598 @@
+@@ -0,0 +1,599 @@
 +------------------- XenGT interface ------------------------
 +Index
 +1 XenGT udev Interface
@@ -346,9 +346,10 @@ index 0000000..39d315d
 +
 +		The field definition:
 +		bit 31 - bit 16	: Reserved;
-+		bit 15 - bit 8	: Receiver; Now the only legal value is 0,
-+				  it means forwarding the virtual_event
-+				  for all live VMs.
++		bit 15 - bit 8	: VM id of receiver
++				  Maximum ID supported by hotplug is 254(0xfe)
++				  vmid 255(0xff) has special meaning to
++				  forward the virtual_event to all live VMs.
 +		bit 7 - bit 4	: Reserved;
 +		bit 3 - bit 1	: Port/monitor selection:
 +			0	-	CRT
@@ -1130,18 +1131,9 @@ index ecffca1..0396b71 100644
  	conditional_sti(regs);
  
 diff --git a/arch/x86/xen/Kconfig b/arch/x86/xen/Kconfig
-index 131dacd..e28c183 100644
+index 131dacd..7fef4dc 100644
 --- a/arch/x86/xen/Kconfig
 +++ b/arch/x86/xen/Kconfig
-@@ -25,7 +25,7 @@ config XEN_PRIVILEGED_GUEST
- 	def_bool XEN_DOM0
- 
- config XEN_PVHVM
--	def_bool y
-+	def_bool n
- 	depends on XEN && PCI && X86_LOCAL_APIC
- 
- config XEN_MAX_DOMAIN_MEMORY
 @@ -51,3 +51,11 @@ config XEN_DEBUG_FS
  	  Enable statistics output and various tuning options in debugfs.
  	  Enabling this option may incur a significant performance overhead.
@@ -1258,10 +1250,10 @@ index cab96b6..834aaff 100644
 +EXPORT_SYMBOL_GPL(xen_unmap_domain_mfn_range_in_kernel);
 diff --git a/arch/x86/xen/vgt_emulate.c b/arch/x86/xen/vgt_emulate.c
 new file mode 100644
-index 0000000..bedeb74
+index 0000000..f8affd6
 --- /dev/null
 +++ b/arch/x86/xen/vgt_emulate.c
-@@ -0,0 +1,929 @@
+@@ -0,0 +1,947 @@
 +/*
 + * vGT instruction emulator
 + * Copyright (c) 2011, Intel Corporation.
@@ -1339,7 +1331,7 @@ index 0000000..bedeb74
 +#define dprintk(fmt, a...)
 +#endif
 +
-+static struct vcpu_io_forwarding_request trap_req;
++static struct xen_domctl_vgt_io_trap vgt_io_trap_data;
 +
 +static inline uint16_t get_selector(
 +	enum x86_segment seg, struct cpu_user_regs *regs)
@@ -1469,14 +1461,15 @@ index 0000000..bedeb74
 +
 +static int is_vgt_trap_pio(unsigned int port)
 +{
++	struct xen_domctl_vgt_io_trap *info = &vgt_io_trap_data;
++
 +	int i;
 +
-+	BUG_ON(trap_req.nr_pio_frags == -1 || trap_req.nr_pio_frags == 0);
-+	for (i=0; i<trap_req.nr_pio_frags; i++) {
-+		if ( port >= trap_req.pio_frags[i].s &&
-+			port <= trap_req.pio_frags[i].e )
++	for (i = 0; i < info->n_pio; i++) {
++		if (port >= info->pio[i].s && port <= info->pio[i].e)
 +			return 1;
 +	}
++
 +	return 0;
 +}
 +
@@ -1845,17 +1838,18 @@ index 0000000..bedeb74
 +
 +static int is_vgt_trap_address(unsigned long pa)
 +{
++	struct xen_domctl_vgt_io_trap *info = &vgt_io_trap_data;
++
 +	int i;
 +
 +	/* Trap address is in page unit. */
 +	pa &= PAGE_MASK;
-+	BUG_ON(trap_req.nr_mmio_frags == -1 || trap_req.nr_mmio_frags == 0);
-+	for (i=0; i<trap_req.nr_mmio_frags; i++)
-+	{
-+		if ( pa >= trap_req.mmio_frags[i].s &&
-+			pa <= trap_req.mmio_frags[i].e )
++
++	for (i = 0; i < info->n_mmio; i++) {
++		if (pa >= info->mmio[i].s && pa <= info->mmio[i].e)
 +			return 1;
 +	}
++
 +	return 0;
 +}
 +
@@ -2114,7 +2108,7 @@ index 0000000..bedeb74
 +static int vgt_emulate_ins(struct pt_regs *regs)
 +{
 +	int rc;
-+	unsigned cpu = smp_processor_id();
++	unsigned cpu = vgt_enter();
 +	struct x86_emulate_ctxt *pctx = &per_cpu(ctxt, cpu);
 +	struct cpu_user_regs *p_regs = pctx->regs;
 +
@@ -2122,6 +2116,7 @@ index 0000000..bedeb74
 +	rc = x86_emulate (pctx, &vgt_emu_ops);
 +	em_regs_2_pt_regs(p_regs, regs);
 +
++	vgt_exit(cpu);
 +	return rc;
 +}
 +
@@ -2159,28 +2154,43 @@ index 0000000..bedeb74
 + */
 +int xen_register_vgt_driver(vgt_ops_t *ops)
 +{
++	struct xen_domctl domctl;
++	struct xen_domctl_vgt_io_trap *info = &domctl.u.vgt_io_trap;
++
++	int i;
++
 +	init_per_cpu_context();
 +
 +	BUG_ON(register_gp_prehandler(xen_vgt_handler) != 0);
 +
-+	/* query the pio/mmio trapped ranges that are set by the vgt driver.
-+	 * trap_req is needed by the emulator.
-+	 */
-+	trap_req.nr_pio_frags = -1;
-+	trap_req.nr_mmio_frags = -1;
++        domctl.domain = 0;
 +
-+	BUG_ON(HYPERVISOR_vcpu_op(VCPUOP_start_io_forward, 0, &trap_req) != 0);
++	/*
++	 * Query the pio/mmio trapped ranges that are set by the vgt driver.
++	 */
++
++	info->n_pio = info->n_mmio = 0;
++
++	BUG_ON(vgt_io_trap(&domctl) != 0);
++
++	BUG_ON(info->n_pio == 0 || info->n_mmio == 0);
++
++	memcpy(&vgt_io_trap_data, info, sizeof(*info));
++
++	info = &vgt_io_trap_data;
++
 +	vgt_ops = ops;
 +
-+	printk("vGT: trap_req.nr_pio_frags: pio %d %lx %lx\n",
-+		trap_req.nr_pio_frags,
-+		(long)trap_req.pio_frags[0].s,
-+		(long)trap_req.pio_frags[0].e);
-+	printk("vGT: trap_req.nr_mmio_frags: mmio %d %lx %lx\n",
-+		trap_req.nr_mmio_frags,
-+		(long)trap_req.mmio_frags[0].s,
-+		(long)trap_req.mmio_frags[0].e);
-+	printk("vGT: install GP handler successfully\n");
++	for (i = 0; i < info->n_pio; i++)
++		printk("VGT: vgt_io_trap: pio %d [ %llx - %llx ]\n",
++			i, info->pio[i].s, info->pio[i].e);
++
++	for (i = 0; i < info->n_mmio; i++)
++		printk("VGT: vgt_io_trap: mmio %d [ %llx - %llx ]\n",
++			i, info->mmio[i].s, info->mmio[i].e);
++
++	printk("VGT: install GP handler successfully\n");
++
 +	return 0;
 +}
 +
@@ -2193,7 +2203,7 @@ index 0000000..bedeb74
 +EXPORT_SYMBOL(hcall_mmio_read);
 diff --git a/arch/x86/xen/x86_emulate.c b/arch/x86/xen/x86_emulate.c
 new file mode 100644
-index 0000000..434d7f0
+index 0000000..a8dae38
 --- /dev/null
 +++ b/arch/x86/xen/x86_emulate.c
 @@ -0,0 +1,4224 @@
@@ -4309,7 +4319,7 @@ index 0000000..434d7f0
 +            _regs.edx = (uint32_t)(((int32_t)_regs.eax < 0) ? -1 : 0);
 +            break;
 +        case 8:
-+            _regs.edx = (_regs.eax < 0) ? -1 : 0;
++            _regs.rdx = (uint64_t)(((int64_t)_regs.rax < 0) ? -1 : 0);
 +            break;
 +        }
 +        break;
@@ -6423,13 +6433,13 @@ index 0000000..434d7f0
 +}
 diff --git a/config-3.8-dom0 b/config-3.8-dom0
 new file mode 100644
-index 0000000..7664096
+index 0000000..9303bc7
 --- /dev/null
 +++ b/config-3.8-dom0
 @@ -0,0 +1,3736 @@
 +#
 +# Automatically generated file; DO NOT EDIT.
-+# Linux/x86_64 3.8.0-vgt Kernel Configuration
++# Linux/x86_64 3.8.13.4-vgt Kernel Configuration
 +#
 +CONFIG_64BIT=y
 +CONFIG_X86_64=y
@@ -6752,7 +6762,7 @@ index 0000000..7664096
 +CONFIG_XEN=y
 +CONFIG_XEN_DOM0=y
 +CONFIG_XEN_PRIVILEGED_GUEST=y
-+# CONFIG_XEN_PVHVM is not set
++CONFIG_XEN_PVHVM=y
 +CONFIG_XEN_MAX_DOMAIN_MEMORY=500
 +CONFIG_XEN_SAVE_RESTORE=y
 +CONFIG_XEN_DEBUG_FS=y
@@ -8160,7 +8170,7 @@ index 0000000..7664096
 +# Enable WiMAX (Networking options) to see the WiMAX drivers
 +#
 +# CONFIG_WAN is not set
-+CONFIG_XEN_NETDEV_FRONTEND=y
++# CONFIG_XEN_NETDEV_FRONTEND is not set
 +CONFIG_XEN_NETDEV_BACKEND=m
 +# CONFIG_VMXNET3 is not set
 +# CONFIG_ISDN is not set
@@ -10251,7 +10261,7 @@ index 261efc8e..a7d7f12 100644
  	{"i915_gem_hws_blt", i915_hws_info, 0, (void *)BCS},
  	{"i915_gem_hws_bsd", i915_hws_info, 0, (void *)VCS},
 diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
-index 99daa89..d858b6a 100644
+index 99daa89..3232833 100644
 --- a/drivers/gpu/drm/i915/i915_dma.c
 +++ b/drivers/gpu/drm/i915/i915_dma.c
 @@ -1437,6 +1437,8 @@ static void i915_dump_device_info(struct drm_i915_private *dev_priv)
@@ -10282,6 +10292,25 @@ index 99daa89..d858b6a 100644
  	/* This must be called before any calls to HAS_PCH_* */
  	intel_detect_pch(dev);
  
+@@ -1606,6 +1613,18 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+ 			DRM_ERROR("failed to init modeset\n");
+ 			goto out_gem_unload;
+ 		}
++
++#ifdef DRM_I915_VGT_SUPPORT
++		if (dev_priv->in_xen_vgt == true) {
++			/*
++			 * Tell VGT that we have a valid surface to show
++			 * after modesetting. We doesn't distinguish DOM0 and
++			 * Linux guest here, The PVINFO write handler will
++			 * handle this.
++			 */
++			I915_WRITE(vgt_info_off(display_ready), 1);
++		}
++#endif
+ 	}
+ 
+ 	i915_setup_sysfs(dev);
 diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
 index 41e02dc..84b0b9d 100644
 --- a/drivers/gpu/drm/i915/i915_drv.c
@@ -11416,15 +11445,28 @@ index fb213cf..f575767 100644
  xen-gntdev-y				:= gntdev.o
  xen-gntalloc-y				:= gntalloc.o
 diff --git a/drivers/xen/events.c b/drivers/xen/events.c
-index 7ae3821..43ea079 100644
+index 7ae3821..8df180e 100644
 --- a/drivers/xen/events.c
 +++ b/drivers/xen/events.c
-@@ -1871,3 +1871,5 @@ void __init xen_init_IRQ(void)
+@@ -268,6 +268,11 @@ static unsigned cpu_from_irq(unsigned irq)
+ 	return info_for_irq(irq)->cpu;
+ }
+ 
++int xen_get_cpu_from_irq(unsigned int irq)
++{
++	return cpu_from_irq(irq);
++}
++
+ static unsigned int cpu_from_evtchn(unsigned int evtchn)
+ {
+ 	int irq = evtchn_to_irq[evtchn];
+@@ -1871,3 +1876,6 @@ void __init xen_init_IRQ(void)
  	}
  #endif
  }
 +EXPORT_SYMBOL(resend_irq_on_evtchn);
 +EXPORT_SYMBOL(bind_virq_to_irq);
++EXPORT_SYMBOL(xen_get_cpu_from_irq);
 diff --git a/drivers/xen/swiotlb-xen.c b/drivers/xen/swiotlb-xen.c
 index af47e75..4ce43b8 100644
 --- a/drivers/xen/swiotlb-xen.c
@@ -11459,10 +11501,10 @@ index 0000000..a5c975a
 +obj-$(CONFIG_XEN_VGT_I915)		+= xen_vgt.o
 diff --git a/drivers/xen/vgt/aperture_gm.c b/drivers/xen/vgt/aperture_gm.c
 new file mode 100644
-index 0000000..169d855
+index 0000000..405c5ea
 --- /dev/null
 +++ b/drivers/xen/vgt/aperture_gm.c
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,343 @@
 +/*
 + * Aperture and Graphics Memory (GM) virtualization
 + *
@@ -11803,20 +11845,15 @@ index 0000000..169d855
 +	printk("ctx_switch_rb_page is allocated at gm(0x%llx)\n",
 +		pdev->ctx_switch_rb_page);
 +
-+	/* one page for mapping batch buffer when PPGTT is disabled */
-+	pdev->batch_buffer_page = aperture_2_gm(pdev, rsvd_aperture_alloc(pdev, PAGE_SIZE));
-+	printk("batch_buffer_page is allocated at gm(0x%llx)\n",
-+		pdev->batch_buffer_page);
-+
 +	pdev->dummy_area = aperture_2_gm(pdev, rsvd_aperture_alloc(pdev, SZ_CONTEXT_AREA_PER_RING));
 +	printk("dummy_area is allocated at gm(0x%llx)\n", pdev->dummy_area);
 +}
 diff --git a/drivers/xen/vgt/cfg_space.c b/drivers/xen/vgt/cfg_space.c
 new file mode 100644
-index 0000000..9e3e7ba
+index 0000000..0ab3049
 --- /dev/null
 +++ b/drivers/xen/vgt/cfg_space.c
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,406 @@
 +/*
 + * PCI Configuration Space virtualization
 + *
@@ -12064,21 +12101,34 @@ index 0000000..9e3e7ba
 +	uint32_t *cfg_reg, new, size;
 +	u8 old_cmd, cmd_changed; /* we don't care the high 8 bits */
 +	bool rc = true;
++	uint32_t low_mem_max_gpfn;
 +
 +	ASSERT ((off + bytes) <= VGT_CFG_SPACE_SZ);
 +	cfg_reg = (uint32_t*)(cfg_space + (off & ~3));
 +	switch (off & ~3) {
++		case VGT_REG_CFG_VENDOR_ID:
++			low_mem_max_gpfn = *(uint32_t *)p_data;
++			vgt_info("low_mem_max_gpfn: 0x%x\n", low_mem_max_gpfn);
++			if (bytes != 4 ||
++				low_mem_max_gpfn >= (1UL << (32-PAGE_SHIFT))) {
++				vgt_warn("invalid low_mem_max_gpfn!\n");
++				break;
++			}
++			if (vgt->low_mem_max_gpfn == 0)
++				vgt->low_mem_max_gpfn = low_mem_max_gpfn;
++			break;
++
 +		case VGT_REG_CFG_COMMAND:
 +			old_cmd = vgt->state.cfg_space[off];
 +			cmd_changed = old_cmd ^ (*(u8*)p_data);
 +			memcpy (&vgt->state.cfg_space[off], p_data, bytes);
 +			if (cmd_changed & _REGBIT_CFG_COMMAND_MEMORY) {
 +				if (old_cmd & _REGBIT_CFG_COMMAND_MEMORY) {
-+					 vgt_hvm_map_apperture(vgt, 0);
++					 vgt_hvm_map_aperture(vgt, 0);
 +					/* need unset trap area? */
 +				} else {
 +
-+					vgt_hvm_map_apperture(vgt, 1);
++					vgt_hvm_map_aperture(vgt, 1);
 +					vgt_hvm_set_trap_area(vgt);
 +				}
 +			} else {
@@ -12105,14 +12155,14 @@ index 0000000..9e3e7ba
 +				 */
 +				new = new & ~(size-1);
 +				if ((off & ~3) == VGT_REG_CFG_SPACE_BAR1)
-+					vgt_hvm_map_apperture(vgt, 0);
++					vgt_hvm_map_aperture(vgt, 0);
 +				vgt_pci_bar_write_32(vgt, off, new);
 +			} else {
 +				if ((off & ~3) == VGT_REG_CFG_SPACE_BAR1)
-+					vgt_hvm_map_apperture(vgt, 0);
++					vgt_hvm_map_aperture(vgt, 0);
 +				vgt_pci_bar_write_32(vgt, off, new);
 +				if ((off & ~3) == VGT_REG_CFG_SPACE_BAR1)
-+					vgt_hvm_map_apperture(vgt, 1);
++					vgt_hvm_map_aperture(vgt, 1);
 +				if ((off & ~3) == VGT_REG_CFG_SPACE_BAR0)
 +					vgt_hvm_set_trap_area(vgt);
 +			}
@@ -12212,10 +12262,10 @@ index 0000000..9e3e7ba
 +}
 diff --git a/drivers/xen/vgt/cmd_parser.c b/drivers/xen/vgt/cmd_parser.c
 new file mode 100644
-index 0000000..66b5e0d
+index 0000000..0f67c86
 --- /dev/null
 +++ b/drivers/xen/vgt/cmd_parser.c
-@@ -0,0 +1,1971 @@
+@@ -0,0 +1,2110 @@
 +/*
 + * vGT command parser
 + *
@@ -12514,6 +12564,13 @@ index 0000000..66b5e0d
 +
 +		apply_post_handle_list(rs, entry->request_id);
 +		apply_patch_list(rs, entry->request_id);
++
++		if ((rs->uhptr & _REGBIT_UHPTR_VALID) &&
++		    (rs->uhptr_id < entry->request_id)) {
++			rs->uhptr &= ~_REGBIT_UHPTR_VALID;
++			VGT_MMIO_WRITE(pdev, VGT_UHPTR(ring_id), rs->uhptr);
++		}
++
 +		VGT_WRITE_TAIL(pdev, ring_id, entry->tail);
 +		list->head = next;
 +	}
@@ -12907,6 +12964,14 @@ index 0000000..66b5e0d
 +#define PLANE_TILE_MASK		(0x1 << PLANE_TILE_SHIFT)
 +#define FLIP_TYPE_MASK		0x3
 +
++#define DISPLAY_FLIP_PLANE_A  0x0
++#define DISPLAY_FLIP_PLANE_B  0x1
++#define DISPLAY_FLIP_SPRITE_A  0x2
++#define DISPLAY_FLIP_SPRITE_B  0x3
++#define DISPLAY_FLIP_PLANE_C  0x4
++#define DISPLAY_FLIP_SPRITE_C  0x5
++
++
 +/* The NOOP for MI_DISPLAY_FLIP has below information stored in NOOP_ID:
 + *
 + *	bit 21 - bit 16 is 0x14, opcode of MI_DISPLAY_FLIP;
@@ -12916,17 +12981,160 @@ index 0000000..66b5e0d
 +#define PLANE_INFO_SHIFT	8
 +#define PLANE_INFO_MASK		(0x7 << PLANE_INFO_SHIFT)
 +
++static bool display_flip_decode_plane_info(uint32_t  plane_code, enum vgt_pipe *pipe, enum vgt_plane_type *plane )
++{
++	switch (plane_code) {
++		case DISPLAY_FLIP_PLANE_A:
++			*pipe = PIPE_A; 
++			*plane = PRIMARY_PLANE;
++			break;
++		case DISPLAY_FLIP_PLANE_B:
++			*pipe = PIPE_B; 
++			*plane = PRIMARY_PLANE; 
++			break;
++		case DISPLAY_FLIP_SPRITE_A:
++			*pipe = PIPE_A; 
++			*plane = SPRITE_PLANE; 
++			break;
++		case DISPLAY_FLIP_SPRITE_B:
++			*pipe = PIPE_B; 
++			*plane = SPRITE_PLANE; 
++			break;
++		case DISPLAY_FLIP_PLANE_C:
++			*pipe = PIPE_C; 
++			*plane = PRIMARY_PLANE; 
++			break;
++		case DISPLAY_FLIP_SPRITE_C:
++			*pipe = PIPE_C; 
++			*plane = SPRITE_PLANE; 
++			break;
++		default:
++			return false;
++	}
++
++	return true;
++
++}
++
++static bool display_flip_encode_plane_info(enum vgt_pipe pipe, enum vgt_plane_type plane, uint32_t * plane_code)
++{
++
++	if(pipe == PIPE_A && plane == PRIMARY_PLANE)
++	{
++		*plane_code = DISPLAY_FLIP_PLANE_A;
++	}
++	else if (pipe == PIPE_B && plane == PRIMARY_PLANE)
++	{
++		*plane_code = DISPLAY_FLIP_PLANE_B;
++	}
++	else if (pipe == PIPE_A && plane == SPRITE_PLANE)
++	{
++		*plane_code = DISPLAY_FLIP_SPRITE_A;
++	}
++	else if (pipe == PIPE_B && plane == SPRITE_PLANE)
++	{
++		*plane_code = DISPLAY_FLIP_SPRITE_B;
++	}
++	else if (pipe == PIPE_C && plane == PRIMARY_PLANE)
++	{
++		*plane_code = DISPLAY_FLIP_PLANE_C;
++	}
++	else if (pipe == PIPE_C && plane == SPRITE_PLANE)
++	{
++		*plane_code = DISPLAY_FLIP_SPRITE_C;
++	}
++	else
++	{
++		return false;
++	}
++
++	return true;
++	
++}
++
++#define GET_INFO_FOR_FLIP(pipe, plane, 					\
++			ctrl_reg, surf_reg, stride_reg, stride_mask)	\
++do{									\
++	if (plane == PRIMARY_PLANE) {					\
++		ctrl_reg = VGT_DSPCNTR(pipe);				\
++		surf_reg = VGT_DSPSURF(pipe);				\
++		stride_reg = VGT_DSPSTRIDE(pipe);			\
++		stride_mask = _PRI_PLANE_STRIDE_MASK;			\
++	} else {							\
++		ASSERT (plane == SPRITE_PLANE);				\
++		ctrl_reg = VGT_SPRCTL(pipe);				\
++		surf_reg = VGT_SPRSURF(pipe);				\
++		stride_reg = VGT_SPRSTRIDE(pipe);			\
++		stride_mask = _SPRITE_STRIDE_MASK;			\
++	}								\
++}while(0);
++
++static bool vgt_flip_parameter_check(struct parser_exec_state *s,
++				uint32_t plane_code,
++				uint32_t stride_val,
++				uint32_t surf_val)
++{
++	struct pgt_device *pdev = s->vgt->pdev;
++	enum vgt_pipe pipe = I915_MAX_PIPES;
++	enum vgt_plane_type plane = MAX_PLANE;
++	uint32_t surf_reg, ctrl_reg;
++	uint32_t stride_reg, stride_mask, phys_stride;
++	uint32_t tile_para, tile_in_ctrl;
++	bool async_flip;
++
++	if (!display_flip_decode_plane_info(plane_code, &pipe, &plane))
++		return false;
++
++	GET_INFO_FOR_FLIP(pipe, plane,
++			ctrl_reg, surf_reg, stride_reg, stride_mask);
++
++	async_flip = ((surf_val & FLIP_TYPE_MASK) == 0x1);
++	tile_para = ((stride_val & TILE_PARA_MASK) >> TILE_PARA_SHIFT);
++	tile_in_ctrl = (__vreg(s->vgt, ctrl_reg) & PLANE_TILE_MASK)
++				>> PLANE_TILE_SHIFT;
++
++	phys_stride = __vreg(current_display_owner(pdev), stride_reg);
++	if ((s->vgt != current_display_owner(pdev)) &&
++		(plane == PRIMARY_PLANE) &&
++		((stride_val & PITCH_MASK) !=
++			(phys_stride & stride_mask))) {
++		vgt_dbg("Stride value may not match display timing! "
++			"MI_DISPLAY_FLIP will be ignored!\n");
++		return false;
++	}
++
++	if ((__vreg(s->vgt, stride_reg) & stride_mask)
++		!= (stride_val & PITCH_MASK)) {
++
++		if (async_flip) {
++			vgt_warn("Cannot change stride in async flip!\n");
++			return false;
++		}
++	}
++
++	if (tile_para != tile_in_ctrl) {
++
++		if (async_flip) {
++			vgt_warn("Cannot change tiling in async flip!\n");
++			return false;
++		}
++	}
++
++	return true;
++}
++
 +static int vgt_handle_mi_display_flip(struct parser_exec_state *s, bool resubmitted)
 +{
 +	uint32_t surf_reg, surf_val, ctrl_reg;
 +	uint32_t stride_reg, stride_val, stride_mask;
-+	uint32_t tile_para, tile_in_ctrl;
-+	uint32_t opcode, plane_code;
++	uint32_t tile_para;
++	uint32_t opcode, plane_code, real_plane_code;
 +	enum vgt_pipe pipe;
++	enum vgt_pipe real_pipe;
 +	enum vgt_plane_type plane;
-+	bool async_flip;
 +	int i, length, rc = 0;
 +	struct fb_notify_msg msg;
++	uint32_t value;
 +
 +	opcode = *(cmd_ptr(s, 0));
 +	stride_val = *(cmd_ptr(s, 1));
@@ -12940,35 +13148,12 @@ index 0000000..66b5e0d
 +		length = cmd_length(s);
 +	}
 +
-+	switch (plane_code) {
-+		case 0:
-+			pipe = PIPE_A; plane = PRIMARY_PLANE; break;
-+		case 1:
-+			pipe = PIPE_B; plane = PRIMARY_PLANE; break;
-+		case 2:
-+			pipe = PIPE_A; plane = SPRITE_PLANE; break;
-+		case 3:
-+			pipe = PIPE_B; plane = SPRITE_PLANE; break;
-+		case 4:
-+			pipe = PIPE_C; plane = PRIMARY_PLANE; break;
-+		case 5:
-+			pipe = PIPE_C; plane = SPRITE_PLANE; break;
-+		default:
-+			goto wrong_command;
++
++	if(!display_flip_decode_plane_info(plane_code, &pipe, &plane)){
++		goto wrong_command;
 +	}
 +
-+	if (plane == PRIMARY_PLANE) {
-+		ctrl_reg = VGT_DSPCNTR(pipe);
-+		surf_reg = VGT_DSPSURF(pipe);
-+		stride_reg = VGT_DSPSTRIDE(pipe);
-+		stride_mask = _PRI_PLANE_STRIDE_MASK;
-+	} else {
-+		ASSERT (plane == SPRITE_PLANE);
-+		ctrl_reg = VGT_SPRCTL(pipe);
-+		surf_reg = VGT_SPRSURF(pipe);
-+		stride_reg = VGT_SPRSTRIDE(pipe);
-+		stride_mask = _SPRITE_STRIDE_MASK;
-+	}
++	real_pipe = s->vgt->pipe_mapping[pipe];
 +
 +	if (length == 4) {
 +		vgt_warn("Page flip of Stereo 3D is not supported!\n");
@@ -12978,41 +13163,28 @@ index 0000000..66b5e0d
 +		goto wrong_command;
 +	}
 +
-+	if (!resubmitted) {
-+		async_flip = ((surf_val & FLIP_TYPE_MASK) == 0x1);
-+		tile_para = ((stride_val & TILE_PARA_MASK) >> TILE_PARA_SHIFT);
-+		tile_in_ctrl = (__vreg(s->vgt, ctrl_reg) & PLANE_TILE_MASK)
-+					>> PLANE_TILE_SHIFT;
-+
-+		if ((__vreg(s->vgt, stride_reg) & stride_mask)
-+			!= (stride_val & PITCH_MASK)) {
-+
-+			if (async_flip) {
-+				vgt_warn("Cannot change stride in async flip!\n");
-+				goto wrong_command;
-+			}
-+			__vreg(s->vgt, stride_reg) = (__vreg(s->vgt, stride_reg) &
-+							(~stride_mask)) |
-+					(stride_val & stride_mask);
-+			__sreg(s->vgt, stride_reg) = __vreg(s->vgt, stride_reg);
-+		}
-+
-+		if (tile_para != tile_in_ctrl) {
-+
-+			if (async_flip) {
-+				vgt_warn("Cannot change tiling in async flip!\n");
-+				goto wrong_command;
-+			}
-+			__vreg(s->vgt, ctrl_reg) =
-+				(__vreg(s->vgt, ctrl_reg) & (~PLANE_TILE_MASK)) |
-+					(tile_para << PLANE_TILE_SHIFT);
-+			__sreg(s->vgt, ctrl_reg) = __vreg(s->vgt, ctrl_reg);
-+		}
++	if ((pipe == I915_MAX_PIPES) || (plane == MAX_PLANE)) {
++		vgt_warn("Invalid pipe/plane in MI_DISPLAY_FLIP!\n");
++		goto wrong_command;
 +	}
 +
-+	if (!(resubmitted && ((surf_val & SURF_MASK) == 0))) {
-+		__vreg(s->vgt, surf_reg) = (__vreg(s->vgt, surf_reg) &
-+				(~SURF_MASK)) | (surf_val & SURF_MASK);
++	if (!resubmitted) {
++		if (!vgt_flip_parameter_check(s, plane_code, stride_val, surf_val)) {
++			goto wrong_command;
++		}
++
++		GET_INFO_FOR_FLIP(pipe, plane,
++			ctrl_reg, surf_reg, stride_reg, stride_mask);
++		tile_para = ((stride_val & TILE_PARA_MASK) >> TILE_PARA_SHIFT);
++
++		__vreg(s->vgt, stride_reg) = (stride_val & stride_mask) |
++				(__vreg(s->vgt, stride_reg) & (~stride_mask));
++		__vreg(s->vgt, ctrl_reg) = (tile_para << PLANE_TILE_SHIFT) |
++				(__vreg(s->vgt, ctrl_reg) & (~PLANE_TILE_MASK));
++		__vreg(s->vgt, surf_reg) = (surf_val & SURF_MASK) |
++				(__vreg(s->vgt, surf_reg) & (~SURF_MASK));
++		__sreg(s->vgt, stride_reg) = __vreg(s->vgt, stride_reg);
++		__sreg(s->vgt, ctrl_reg) = __vreg(s->vgt, ctrl_reg);
 +		__sreg(s->vgt, surf_reg) = __vreg(s->vgt, surf_reg);
 +	}
 +
@@ -13021,10 +13193,16 @@ index 0000000..66b5e0d
 +	vgt_fb_notifier_call_chain(FB_DISPLAY_FLIP, &msg);
 +
 +	if ((s->vgt == current_foreground_vm(s->vgt->pdev)) && !resubmitted) {
++		if(!display_flip_encode_plane_info(real_pipe, plane, &real_plane_code))		
++		{
++			goto wrong_command;
++		}
++ 
++		value = *(cmd_ptr(s, 0));
++		add_patch_entry(s, cmd_ptr(s,0), (value & ~PLANE_SELECT_MASK) |  (real_plane_code << PLANE_SELECT_SHIFT));
 +		return 0;
 +	}
 +
-+command_noop:
 +	vgt_dbg("VM %d: mi_display_flip to be ignored\n",
 +		s->vgt->vm_id);
 +
@@ -13041,8 +13219,9 @@ index 0000000..66b5e0d
 +	return rc;
 +
 +wrong_command:
-+	vgt_warn("VM %d: wrong mi_display_flip command!\n", s->vgt->vm_id);
-+	goto command_noop;
++	for (i = 0; i < length; i ++)
++		rc |= add_patch_entry(s, cmd_ptr(s, i), MI_NOOP);
++	return rc;
 +}
 +
 +static int vgt_cmd_handler_mi_display_flip(struct parser_exec_state *s)
@@ -13177,7 +13356,7 @@ index 0000000..66b5e0d
 +	  1 - use as graphics address
 +	 */
 +
-+	return VGT_MMIO_READ(s->vgt->pdev,_REG_RCS_INSTPM) & INSTPM_CONS_BUF_ADDR_OFFSET_DIS;
++	return __vreg(s->vgt,_REG_RCS_INSTPM) & INSTPM_CONS_BUF_ADDR_OFFSET_DIS;
 +}
 +
 +static int vgt_cmd_handler_3dstate_constant_gs(struct parser_exec_state *s)
@@ -13876,6 +14055,9 @@ index 0000000..66b5e0d
 +	{"MFD_AVC_BSD_OBJECT", OP_MFD_AVC_BSD_OBJECT, F_LEN_VAR,
 +		R_VCS, D_ALL, 0, 12, NULL},
 +
++	{"MFD_AVC_SLICEADDR", OP_MFD_AVC_SLICEADDR, F_LEN_VAR,
++		R_VCS, D_IVB_PLUS, ADDR_FIX_1(2), 12, NULL},
++
 +	{"MFC_AVC_FQM_STATE", OP_MFC_AVC_FQM_STATE, F_LEN_VAR,
 +		R_VCS, D_SNB, 0, 12, NULL},
 +
@@ -14159,6 +14341,10 @@ index 0000000..66b5e0d
 +	vgt_state_ring_t *rs = &vgt->rb[ring_id];
 +	vgt_ringbuffer_t *vring = &rs->vring;
 +	int ret;
++	cycles_t t0, t1;
++	struct vgt_statistics *stat = &vgt->stat;
++
++	t0 = get_cycles();
 +
 +	if ( !(vring->ctl & _RING_CTL_ENABLE) ) {
 +		/* Ring is enabled */
@@ -14167,6 +14353,7 @@ index 0000000..66b5e0d
 +		return 0;
 +	}
 +
++	stat->vring_scan_cnt++;
 +	rs->request_id++;
 +	ret = __vgt_scan_vring (vgt, ring_id, rs->last_scan_head,
 +		vring->tail & RB_TAIL_OFF_MASK,
@@ -14174,6 +14361,8 @@ index 0000000..66b5e0d
 +
 +	rs->last_scan_head = vring->tail;
 +
++	t1 = get_cycles();
++	stat->vring_scan_cycles += t1 - t0;
 +	ASSERT_VM(!ret, vgt);
 +	return ret;
 +}
@@ -14189,10 +14378,10 @@ index 0000000..66b5e0d
 +}
 diff --git a/drivers/xen/vgt/cmd_parser.h b/drivers/xen/vgt/cmd_parser.h
 new file mode 100644
-index 0000000..0e8e8bc
+index 0000000..0e69212
 --- /dev/null
 +++ b/drivers/xen/vgt/cmd_parser.h
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,486 @@
 +/*
 + * cmd_parser.h: core header file for vGT command parser
 + *
@@ -14490,6 +14679,7 @@ index 0000000..0e8e8bc
 +
 +#define OP_MFD_AVC_PICID_STATE                     OP_MFX(2, 1, 1, 5) /* HSW+ */
 +#define OP_MFD_AVC_DPB_STATE			   OP_MFX(2, 1, 1, 6) /* IVB+ */
++#define OP_MFD_AVC_SLICEADDR                       OP_MFX(2, 1, 1, 7) /* IVB+ */
 +#define OP_MFD_AVC_BSD_OBJECT                      OP_MFX(2, 1, 1, 8) /* ALL */
 +
 +#define OP_MFC_AVC_FQM_STATE                       OP_MFX(2, 1, 2, 2) /* SNB */
@@ -14680,10 +14870,10 @@ index 0000000..0e8e8bc
 +extern void vgt_cmd_name(uint32_t cmd, int ring_id, int gen);
 diff --git a/drivers/xen/vgt/debugfs.c b/drivers/xen/vgt/debugfs.c
 new file mode 100644
-index 0000000..f14f9ac
+index 0000000..6f2d6a5
 --- /dev/null
 +++ b/drivers/xen/vgt/debugfs.c
-@@ -0,0 +1,775 @@
+@@ -0,0 +1,779 @@
 +/*
 + * Debugfs interfaces
 + *
@@ -14796,18 +14986,6 @@ index 0000000..f14f9ac
 +};
 +
 +static debug_statistics_t  stat_info [] = {
-+	{ "gtt_mmio_rcnt", &gtt_mmio_rcnt },
-+	{ "gtt_mmio_wcnt", &gtt_mmio_wcnt },
-+	{ "gtt_mmio_wcycles", &gtt_mmio_wcycles },
-+	{ "gtt_mmio_rcycles", &gtt_mmio_rcycles },
-+	{ "mmio_rcnt", &mmio_rcnt },
-+	{ "mmio_wcnt", &mmio_wcnt },
-+	{ "mmio_wcycles", &mmio_wcycles },
-+	{ "mmio_rcycles", &mmio_rcycles },
-+	{ "ring_mmio_rcnt", &ring_mmio_rcnt },
-+	{ "ring_mmio_wcnt", &ring_mmio_wcnt },
-+	{ "ring_tail_mmio_wcnt", &ring_tail_mmio_wcnt },
-+	{ "ring_tail_mmio_wcycles", &ring_tail_mmio_wcycles },
 +	{ "context_switch_cycles", &context_switch_cost },
 +	{ "context_switch_num", &context_switch_num },
 +	{ "ring_0_busy", &ring_0_busy },
@@ -15426,6 +15604,22 @@ index 0000000..f14f9ac
 +		debugfs_create_u64_node ("allocated_cycles", 0444, perf_dir_entry, &(vgt->stat.allocated_cycles));
 +		//debugfs_create_u64_node ("used_cycles", 0444, perf_dir_entry, &(vgt->stat.used_cycles));
 +
++		debugfs_create_u64_node ("gtt_mmio_rcnt", 0444, perf_dir_entry, &(vgt->stat.gtt_mmio_rcnt));
++		debugfs_create_u64_node ("gtt_mmio_wcnt", 0444, perf_dir_entry, &(vgt->stat.gtt_mmio_wcnt));
++		debugfs_create_u64_node ("gtt_mmio_wcycles", 0444, perf_dir_entry, &(vgt->stat.gtt_mmio_wcycles));
++		debugfs_create_u64_node ("gtt_mmio_rcycles", 0444, perf_dir_entry, &(vgt->stat.gtt_mmio_rcycles));
++		debugfs_create_u64_node ("mmio_rcnt", 0444, perf_dir_entry, &(vgt->stat.mmio_rcnt));
++		debugfs_create_u64_node ("mmio_wcnt", 0444, perf_dir_entry, &(vgt->stat.mmio_wcnt));
++		debugfs_create_u64_node ("mmio_wcycles", 0444, perf_dir_entry, &(vgt->stat.mmio_wcycles));
++		debugfs_create_u64_node ("mmio_rcycles", 0444, perf_dir_entry, &(vgt->stat.mmio_rcycles));
++		debugfs_create_u64_node ("ring_mmio_rcnt", 0444, perf_dir_entry, &(vgt->stat.ring_mmio_rcnt));
++		debugfs_create_u64_node ("ring_mmio_wcnt", 0444, perf_dir_entry, &(vgt->stat.ring_mmio_wcnt));
++		debugfs_create_u64_node ("ring_tail_mmio_wcnt", 0444, perf_dir_entry, &(vgt->stat.ring_tail_mmio_wcnt));
++		debugfs_create_u64_node ("ring_tail_mmio_wcycles", 0444, perf_dir_entry, &(vgt->stat.ring_tail_mmio_wcycles));
++		debugfs_create_u64_node ("total_cmds", 0444, perf_dir_entry, &(vgt->total_cmds));
++		debugfs_create_u64_node ("vring_scan_cnt", 0444, perf_dir_entry, &(vgt->stat.vring_scan_cnt));
++		debugfs_create_u64_node ("vring_scan_cycles", 0444, perf_dir_entry, &(vgt->stat.vring_scan_cycles));
++
 +		/* cmd statistics for ring/batch buffers */
 +		cmdstat_dir_entry = debugfs_create_dir("ring", perf_dir_entry);
 +		if (!cmdstat_dir_entry)
@@ -15807,10 +16001,10 @@ index 0000000..7023421
 +
 diff --git a/drivers/xen/vgt/display.c b/drivers/xen/vgt/display.c
 new file mode 100644
-index 0000000..0ca0e88
+index 0000000..8ad9696
 --- /dev/null
 +++ b/drivers/xen/vgt/display.c
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,453 @@
 +/*
 + * Display context switch
 + *
@@ -15843,10 +16037,15 @@ index 0000000..0ca0e88
 +#include <linux/delay.h>
 +#include "vgt.h"
 +
-+#define vgt_restore_sreg(reg)	\
-+	do {	\
-+		VGT_MMIO_WRITE(vgt->pdev, (reg), __sreg(vgt, (reg))); \
-+	} while (0);
++static void vgt_restore_sreg(struct vgt_device *vgt,unsigned int reg)
++{
++	unsigned int real_reg;
++	if(vgt_map_plane_reg(vgt, reg, &real_reg))
++	{
++		VGT_MMIO_WRITE(vgt->pdev, real_reg, __sreg(vgt, (reg)));
++	}
++
++}
 +
 +static int vgt_restore_state(struct vgt_device *vgt, enum vgt_pipe pipe)
 +{
@@ -15855,15 +16054,15 @@ index 0000000..0ca0e88
 +	if (pipe_ctrl & _REGBIT_PIPE_ENABLE) {
 +#endif
 +		vgt_dbg ("start to restore pipe %d.\n", pipe + 1);
-+		vgt_restore_sreg(VGT_DSPCNTR(pipe));
-+		vgt_restore_sreg(VGT_DSPSTRIDE(pipe));
-+		vgt_restore_sreg(VGT_DSPSURF(pipe));
-+		vgt_restore_sreg(VGT_DSPTILEOFF(pipe));
-+		vgt_restore_sreg(VGT_DSPLINOFF(pipe));
++		vgt_restore_sreg(vgt, VGT_DSPCNTR(pipe));
++		vgt_restore_sreg(vgt, VGT_DSPSTRIDE(pipe));
++		vgt_restore_sreg(vgt, VGT_DSPSURF(pipe));
++		vgt_restore_sreg(vgt, VGT_DSPTILEOFF(pipe));
++		vgt_restore_sreg(vgt, VGT_DSPLINOFF(pipe));
 +
-+		vgt_restore_sreg(VGT_CURPOS(pipe));
-+		vgt_restore_sreg(VGT_CURCNTR(pipe));
-+		vgt_restore_sreg(VGT_CURBASE(pipe));
++		vgt_restore_sreg(vgt, VGT_CURPOS(pipe));
++		vgt_restore_sreg(vgt, VGT_CURCNTR(pipe));
++		vgt_restore_sreg(vgt, VGT_CURBASE(pipe));
 +		vgt_dbg ("finished pipe %d restore.\n", pipe + 1);
 +#if 0
 +	} else {
@@ -15966,17 +16165,11 @@ index 0000000..0ca0e88
 +{
 +	int i;
 +	enum vgt_event_type event = EVENT_MAX;
-+	enum vgt_port_type edid_idx = VGT_PORT_MAX;
++	enum vgt_port_type port_idx = VGT_PORT_MAX;
 +
-+	if (get_event_and_edid_info(hotplug_cmd, &event, &edid_idx) < 0)
++	if (get_event_and_edid_info(hotplug_cmd, &event, &port_idx) < 0)
 +		return;
 +
-+	/* Default: send hotplug virtual interrupts to all VMs currently.
-+	 * Since 'vmid' has no concern with vgt_id, e.g.  if you have a HVM
-+	 * with vmid = 1 and after destroy & recreate it, its vmid become 2
-+	 * we need to use vmid_2_vgt_device() to map vmid to vgt_device if
-+	 * we need to send these hotplug virtual interrupts to a specific vm
-+	 */
 +	spin_lock_irq(&dev->lock);
 +	for (i = 0; i < VGT_MAX_VMS; ++ i) {
 +		struct vgt_device *vgt = dev->device[i];
@@ -15984,14 +16177,22 @@ index 0000000..0ca0e88
 +		if (!vgt)
 +			continue;
 +
-+		if (hotplug_cmd.action == 0x1) {
-+			/* plug in */
-+			vgt_propagate_edid(vgt, edid_idx);
-+		} else {
-+			/* pull out */
-+			vgt_clear_edid(vgt, edid_idx);
++		if (hotplug_cmd.vmid != HOTPLUG_VMID_FOR_ALL_VMS) {
++			if (vgt != vmid_2_vgt_device(hotplug_cmd.vmid))
++				continue;
 +		}
 +
++		if (hotplug_cmd.action == 0x1) {
++			/* plug in */
++			vgt_propagate_edid(vgt, port_idx);
++			vgt_propagate_dpcd(vgt, port_idx);
++		} else {
++			/* pull out */
++			vgt_clear_edid(vgt, port_idx);
++			vgt_clear_dpcd(vgt, port_idx);
++		}
++
++		vgt_update_monitor_status(vgt);
 +		vgt_trigger_virtual_event(vgt, event);
 +	}
 +
@@ -16014,6 +16215,7 @@ index 0000000..0ca0e88
 +
 +bool vgt_hotplug_uevent_handler(struct vgt_uevent_info *uevent_entry, struct pgt_device *pdev)
 +{
++	vgt_probe_dpcd(pdev, -1);
 +	vgt_probe_edid(pdev, -1);
 +	return vgt_default_uevent_handler(uevent_entry, pdev);
 +}
@@ -16059,7 +16261,7 @@ index 0000000..0ca0e88
 +	{"VGT disable VGA mode", -1, KOBJ_ADD, {"VGT_ENABLE_VGA=0", NULL, NULL}, vgt_vga_stat_uevent_handler},
 +};
 +
-+void inline vgt_set_uevent(struct vgt_device *vgt, enum vgt_uevent_type uevent)
++void vgt_set_uevent(struct vgt_device *vgt, enum vgt_uevent_type uevent)
 +{
 +	struct vgt_uevent_info *entry;
 +
@@ -16092,13 +16294,176 @@ index 0000000..0ca0e88
 +	}
 +}
 +
++void vgt_update_monitor_status(struct vgt_device *vgt)
++{
++	__vreg(vgt, _REG_SDEISR) &= ~(_REGBIT_DP_B_HOTPLUG |
++					_REGBIT_DP_C_HOTPLUG |
++					_REGBIT_DP_D_HOTPLUG);
++
++	if (test_bit(VGT_DP_B, vgt->presented_ports) ||
++		test_bit(VGT_HDMI_B, vgt->presented_ports)) {
++		__vreg(vgt, _REG_SDEISR) |= _REGBIT_DP_B_HOTPLUG;
++	}
++	if (test_bit(VGT_DP_C, vgt->presented_ports) ||
++		test_bit(VGT_HDMI_C, vgt->presented_ports)) {
++		__vreg(vgt, _REG_SDEISR) |= _REGBIT_DP_C_HOTPLUG;
++	}
++	if (test_bit(VGT_DP_D, vgt->presented_ports) ||
++		test_bit(VGT_HDMI_D, vgt->presented_ports)) {
++		__vreg(vgt, _REG_SDEISR) |= _REGBIT_DP_D_HOTPLUG;
++	}
++}
++
++
++static bool is_same_port(vgt_reg_t trans_coder_ctl1, vgt_reg_t trans_coder_ctl2)
++{
++	return !(( trans_coder_ctl1 ^ trans_coder_ctl2 ) & ( _REGBIT_TRANS_DDI_PORT_MASK | _REGBIT_TRANS_DDI_MODE_SELECT_MASK ));
++}
++
++static enum vgt_pipe get_edp_input(uint32_t wr_data)
++{
++	enum vgt_pipe pipe;
++	switch (wr_data & _REGBIT_TRANS_DDI_EDP_INPUT_MASK) 
++	{
++		case _REGBIT_TRANS_DDI_EDP_INPUT_A_ON:
++		case _REGBIT_TRANS_DDI_EDP_INPUT_A_ONOFF:
++			pipe = PIPE_A;
++			break;
++		case _REGBIT_TRANS_DDI_EDP_INPUT_B_ONOFF:
++			pipe = PIPE_B;
++			break;
++		case _REGBIT_TRANS_DDI_EDP_INPUT_C_ONOFF:
++			pipe = PIPE_C;
++			break;
++		default:
++			pipe = I915_MAX_PIPES;
++	}
++	return pipe;
++}
++
++
++bool rebuild_pipe_mapping(struct vgt_device *vgt, unsigned int reg, uint32_t wr_data)
++{
++	vgt_reg_t hw_value;	
++	int i = 0;
++
++	enum vgt_pipe virtual_pipe = I915_MAX_PIPES;
++	enum vgt_pipe physical_pipe = I915_MAX_PIPES ;
++
++	if(vgt->vm_id == 0) {
++		return true;
++	}
++	
++	if(reg == _REG_TRANS_DDI_FUNC_CTL_A) {
++		virtual_pipe = PIPE_A;
++	}
++	else if(reg == _REG_TRANS_DDI_FUNC_CTL_B) {
++		virtual_pipe = PIPE_B;
++	}
++	else if(reg == _REG_TRANS_DDI_FUNC_CTL_C) {
++		virtual_pipe = PIPE_C;
++	}
++
++	if((_REGBIT_TRANS_DDI_FUNC_ENABLE & wr_data) == 0)
++	{
++		vgt_set_pipe_mapping(vgt, virtual_pipe, I915_MAX_PIPES);
++		return true;
++	}
++
++
++	if(reg == _REG_TRANS_DDI_FUNC_CTL_EDP)
++	{
++		virtual_pipe = get_edp_input(wr_data);
++		hw_value= VGT_MMIO_READ(vgt->pdev, _REG_TRANS_DDI_FUNC_CTL_EDP);
++		physical_pipe = get_edp_input(hw_value);
++	}
++	else
++	{
++		for(i = 0; i <= TRANSCODER_C; i++)
++		{
++			hw_value = VGT_MMIO_READ(vgt->pdev, _VGT_TRANS_DDI_FUNC_CTL(i));
++			if(is_same_port(wr_data,hw_value) && ( _REGBIT_TRANS_DDI_FUNC_ENABLE & hw_value))
++			{
++				physical_pipe = i;
++				break;
++			}
++		}
++	}
++
++	vgt_set_pipe_mapping(vgt, virtual_pipe, physical_pipe);
++
++	if(current_foreground_vm(vgt->pdev) == vgt)
++	{
++		vgt_restore_state(vgt, virtual_pipe);
++	}
++
++	return true;
++
++}
++
++
++
++bool update_pipe_mapping(struct vgt_device *vgt, unsigned int physical_reg, uint32_t physical_wr_data)
++{
++	int i = 0;
++	uint32_t virtual_wr_data;
++	enum vgt_pipe virtual_pipe = I915_MAX_PIPES;
++	enum vgt_pipe physical_pipe = I915_MAX_PIPES ;
++	
++	if(physical_reg == _REG_TRANS_DDI_FUNC_CTL_A) {
++		physical_pipe = PIPE_A;
++	}
++	else if(physical_reg == _REG_TRANS_DDI_FUNC_CTL_B) {
++		physical_pipe = PIPE_B;
++	}
++	else if(physical_reg == _REG_TRANS_DDI_FUNC_CTL_C) {
++		physical_pipe = PIPE_C;
++	}
++
++	if((_REGBIT_TRANS_DDI_FUNC_ENABLE & physical_wr_data) == 0) {
++		if(physical_reg == _REG_TRANS_DDI_FUNC_CTL_EDP ){
++			virtual_pipe = get_edp_input( __vreg(vgt, _REG_TRANS_DDI_FUNC_CTL_EDP));
++			vgt_set_pipe_mapping(vgt, virtual_pipe, I915_MAX_PIPES);
++		}else{
++			for(i = 0; i < I915_MAX_PIPES; i ++){
++				if(vgt->pipe_mapping[i] == physical_pipe){
++					vgt_set_pipe_mapping(vgt, i, I915_MAX_PIPES);
++				}
++			}
++		}
++		return true;
++	}
++
++	/*enable case*/
++
++	if(physical_reg == _REG_TRANS_DDI_FUNC_CTL_EDP)	{
++		physical_pipe = get_edp_input(physical_wr_data);
++		virtual_wr_data= __vreg(vgt, _REG_TRANS_DDI_FUNC_CTL_EDP);
++		virtual_pipe = get_edp_input(virtual_wr_data);
++	} else {
++		for(i = 0; i <= TRANSCODER_C; i++)	{
++			virtual_wr_data = __vreg(vgt, _VGT_TRANS_DDI_FUNC_CTL(i));			
++			if(is_same_port(virtual_wr_data,physical_wr_data) && 
++				(_REGBIT_TRANS_DDI_FUNC_ENABLE & virtual_wr_data ) )	{
++				virtual_pipe = i;
++				break;
++			}
++		}
++	}
++
++	if(virtual_pipe != I915_MAX_PIPES){
++		vgt_set_pipe_mapping(vgt, virtual_pipe, physical_pipe);
++	}
++	
++	return true;
++}
 +
 diff --git a/drivers/xen/vgt/edid.c b/drivers/xen/vgt/edid.c
 new file mode 100644
-index 0000000..9554fc4
+index 0000000..e694d4b
 --- /dev/null
 +++ b/drivers/xen/vgt/edid.c
-@@ -0,0 +1,1358 @@
+@@ -0,0 +1,1352 @@
 +/*
 + * vGT EDID virtualization module
 + *
@@ -16517,7 +16882,7 @@ index 0000000..9554fc4
 +			unsigned int value;
 +			int length;
 +
-+			msg[0] = VGT_AUX_I2C_WRITE << 4;
++			msg[0] = (VGT_AUX_I2C_WRITE | VGT_AUX_I2C_MOT) << 4;
 +			msg[1] = 0;
 +			msg[2] = EDID_ADDR;
 +			msg[3] = 1;
@@ -16530,10 +16895,10 @@ index 0000000..9554fc4
 +			vgt_aux_ch_transaction(pdev, aux_ch_addr, msg, 5);
 +
 +			/* start */
++			msg[0] = (VGT_AUX_I2C_READ | VGT_AUX_I2C_MOT) << 4;
 +			vgt_aux_ch_transaction(pdev, aux_ch_addr, msg, 3);
 +
 +			/* read */
-+			msg[0] = VGT_AUX_I2C_READ << 4;
 +			msg[1] = 0;
 +			msg[2] = EDID_ADDR;
 +			msg[3] = 0;
@@ -16767,7 +17132,7 @@ index 0000000..9554fc4
 +	for (i = 0; i < DPCD_MAX; ++i) {
 +		struct vgt_dpcd_data *dpcd = vgt->pdev->pdev_dpcds[i];
 +
-+		if (!vgt_port_equivalent(i, index))
++		if (!vgt_port_equivalent(VGT_DP_A + i, index))
 +			continue;
 +
 +		if (!dpcd) {
@@ -16807,7 +17172,7 @@ index 0000000..9554fc4
 +	int i;
 +
 +	for (i = 0; i < DPCD_MAX; ++i) {
-+		if (vgt_port_equivalent(i, index)) {
++		if (vgt_port_equivalent(VGT_DP_A + i, index)) {
 +			if (vgt->vgt_dpcds[i]) {
 +				vgt_dbg("DPCD clear: Clear DPCD[0x%x] of VM%d\n",
 +					i, vgt->vm_id);
@@ -17299,21 +17664,15 @@ index 0000000..9554fc4
 +				unsigned int offset,
 +				VGT_DP_PORTS_IDX port_idx, void *p_data)
 +{
-+	bool auxch_emulate;
 +	AUX_CH_REGISTERS reg;
 +
 +	if (!i2c_bus->aux_ch.i2c_over_aux_ch || !i2c_bus->aux_ch.aux_ch_mot) {
 +		return;
 +	}
 +
-+	auxch_emulate = (*pedid != NULL);
 +	reg = vgt_get_aux_ch_reg(offset);
-+
-+	ASSERT(auxch_emulate);
-+
 +	*(unsigned int *)p_data = *i2c_bus->aux_ch.aux_registers[port_idx][reg];
-+	EDID_MSG(VGT_EDID_INFO, auxch_emulate,
-+	"read reg[0x%x] with value:0x%x\n", offset, *(unsigned int *)p_data);
++
 +	return;
 +}
 +
@@ -17765,10 +18124,10 @@ index 0000000..bfe9c66
 +#endif /*_VGT_EDID_H_*/
 diff --git a/drivers/xen/vgt/fb_decoder.c b/drivers/xen/vgt/fb_decoder.c
 new file mode 100644
-index 0000000..f0f5218
+index 0000000..31fed80
 --- /dev/null
 +++ b/drivers/xen/vgt/fb_decoder.c
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,429 @@
 +/*
 + * Decode framebuffer attributes from raw vMMIO
 + *
@@ -18135,21 +18494,29 @@ index 0000000..f0f5218
 +int vgt_decode_fb_format(int vmid, struct vgt_fb_format *fb)
 +{
 +	int i;
-+	struct vgt_device *vgt = vmid_2_vgt_device(vmid);
++	struct vgt_device *vgt;
++	struct pgt_device *pdev = &default_device;
++	unsigned long flags;
 +	int ret = 0;
 +
 +	if (!fb)
 +		return -EINVAL;
 +
-+	if (!vgt) {
-+		vgt_err("Invalid domain ID (%d)\n", vmid);
-+		return -ENODEV;
-+	}
-+
-+	if (!IS_HSW(vgt->pdev)) {
++	if (!IS_HSW(pdev)) {
 +		vgt_err("Only HSW is supported now\n");
 +		return -EINVAL;
 +	}
++
++	/* TODO: use fine-grained refcnt later */
++	spin_lock_irqsave(&pdev->lock, flags);
++
++	vgt = vmid_2_vgt_device(vmid);
++	if (!vgt) {
++		vgt_err("Invalid domain ID (%d)\n", vmid);
++		spin_unlock_irqrestore(&pdev->lock, flags);
++		return -ENODEV;
++	}
++
 +	for (i = 0; i < MAX_INTEL_PIPES; i++) {
 +		struct vgt_pipe_format *pipe = &fb->pipes[i];
 +
@@ -18163,6 +18530,8 @@ index 0000000..f0f5218
 +			break;
 +		}
 +	}
++
++	spin_unlock_irqrestore(&pdev->lock, flags);
 +
 +	vgt_show_fb_format(vmid, fb);
 +	return ret;
@@ -18190,10 +18559,10 @@ index 0000000..f0f5218
 +EXPORT_SYMBOL_GPL(vgt_fb_notifier_call_chain);
 diff --git a/drivers/xen/vgt/gtt.c b/drivers/xen/vgt/gtt.c
 new file mode 100644
-index 0000000..54c4e1c
+index 0000000..19f6f56
 --- /dev/null
 +++ b/drivers/xen/vgt/gtt.c
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,741 @@
 +/*
 + * GTT virtualization
 + *
@@ -18227,11 +18596,6 @@ index 0000000..54c4e1c
 +#include <xen/interface/hvm/hvm_op.h>
 +
 +#include "vgt.h"
-+
-+u64 gtt_mmio_rcnt=0;
-+u64 gtt_mmio_wcnt=0;
-+u64 gtt_mmio_wcycles=0;
-+u64 gtt_mmio_rcycles=0;
 +
 +unsigned long gtt_pte_get_pfn(struct pgt_device *pdev, u32 pte)
 +{
@@ -18587,12 +18951,9 @@ index 0000000..54c4e1c
 +	void *p_data, unsigned int bytes)
 +{
 +	uint32_t g_gtt_index;
-+		cycles_t t0, t1;
 +
 +	ASSERT(bytes == 4);
 +
-+	t0 = get_cycles();
-+	gtt_mmio_rcnt++;
 +	off -= vgt->pdev->mmio_size;
 +	if (off >= vgt->vgtt_sz) {
 +		vgt_dbg("vGT(%d): captured out of range GTT read on off %x\n", vgt->vgt_id, off);
@@ -18601,9 +18962,6 @@ index 0000000..54c4e1c
 +
 +	g_gtt_index = GTT_OFFSET_TO_INDEX(off);
 +	*(uint32_t*)p_data = vgt->vgtt[g_gtt_index];
-+	t1 = get_cycles();
-+	t1 -= t0;
-+	gtt_mmio_rcycles += (u64) t1;
 +	return true;
 +}
 +
@@ -18611,12 +18969,20 @@ index 0000000..54c4e1c
 +	void *p_data, unsigned int bytes)
 +{
 +	int ret;
++	cycles_t t0, t1;
++	struct vgt_statistics *stat = &vgt->stat;
++
++	t0 = get_cycles();
++	stat->gtt_mmio_rcnt++;
++
 +	ASSERT(bytes == 4 || bytes == 8);
 +
 +	ret = gtt_mmio_read32(vgt, off, p_data, 4);
 +	if (ret && bytes == 8)
 +		ret = gtt_mmio_read32(vgt, off + 4, (char*)p_data + 4, 4);
 +
++	t1 = get_cycles();
++	stat->gtt_mmio_rcycles += (u64) (t1 - t0);
 +	return ret;
 +}
 +
@@ -18628,12 +18994,9 @@ index 0000000..54c4e1c
 +	uint32_t g_gtt_val, h_gtt_val, g_gtt_index, h_gtt_index;
 +	int rc;
 +	uint64_t g_addr;
-+		cycles_t t0, t1;
 +
 +	ASSERT(bytes == 4);
 +
-+	t0 = get_cycles();
-+	gtt_mmio_wcnt++;
 +	off -= vgt->pdev->mmio_size;
 +
 +	g_gtt_index = GTT_OFFSET_TO_INDEX(off);
@@ -18677,10 +19040,6 @@ index 0000000..54c4e1c
 +	}
 +#endif
 +out:
-+	t1 = get_cycles();
-+	t1 -= t0;
-+	gtt_mmio_wcycles += (u64) t1;
-+
 +	return true;
 +}
 +
@@ -18688,12 +19047,20 @@ index 0000000..54c4e1c
 +	void *p_data, unsigned int bytes)
 +{
 +	int ret;
++	cycles_t t0, t1;
++	struct vgt_statistics *stat = &vgt->stat;
++
++	t0 = get_cycles();
++	stat->gtt_mmio_wcnt++;
++
 +	ASSERT(bytes == 4 || bytes == 8);
 +
 +	ret = gtt_mmio_write32(vgt, off, p_data, 4);
 +	if (ret && bytes == 8)
 +		ret = gtt_mmio_write32(vgt, off + 4, (char*)p_data + 4, 4);
 +
++	t1 = get_cycles();
++	stat->gtt_mmio_wcycles += (u64) (t1 - t0);
 +	return ret;
 +}
 +
@@ -18939,10 +19306,10 @@ index 0000000..54c4e1c
 +
 diff --git a/drivers/xen/vgt/handlers.c b/drivers/xen/vgt/handlers.c
 new file mode 100644
-index 0000000..cee66c5
+index 0000000..538fc3e
 --- /dev/null
 +++ b/drivers/xen/vgt/handlers.c
-@@ -0,0 +1,2532 @@
+@@ -0,0 +1,2607 @@
 +/*
 + * MMIO virtualization handlers
 + *
@@ -18971,6 +19338,7 @@ index 0000000..cee66c5
 +#include <linux/delay.h>
 +#include <linux/acpi_io.h>
 +
++#include <xen/interface/vcpu.h>
 +#include <xen/interface/hvm/hvm_op.h>
 +#include <xen/fb_decoder.h>
 +
@@ -19198,7 +19566,6 @@ index 0000000..cee66c5
 +		void *p_data, unsigned int bytes)
 +{
 +	uint32_t data;
-+	int i;
 +
 +	data = 0;
 +	memcpy(&data, p_data, bytes);
@@ -19221,13 +19588,31 @@ index 0000000..cee66c5
 +	/* TODO: add appropriate action */
 +	/* so far, we just simply ignore it and VM treat it as success */
 +
-+	for (i = 0; i < vgt->pdev->max_engines; i++) {
-+		show_debug(vgt->pdev, i);
-+		show_ringbuffer(vgt->pdev, i, 16 * sizeof(vgt_reg_t));
-+	}
++	show_debug(vgt->pdev);
 +
 +	/* after this point, driver should re-initialize the device */
 +	vgt->warn_untrack = 1;
++	return true;
++}
++
++static bool rrmr_mmio_write(struct vgt_device *vgt, unsigned int offset,
++	void *p_data, unsigned int bytes)
++{
++	uint32_t old_rrmr, new_rrmr, new_physical_rrmr;
++	struct pgt_device *pdev = vgt->pdev;
++
++	old_rrmr = __vreg(vgt, offset);
++	new_physical_rrmr = new_rrmr = *(u32 *)p_data;
++
++	__vreg(vgt, offset) = new_rrmr;
++
++	if (old_rrmr != new_rrmr) {
++		new_physical_rrmr = vgt_recalculate_mask_bits(pdev, offset);
++		VGT_MMIO_WRITE(pdev, offset, new_physical_rrmr);
++	}
++
++	vgt_info("RRMR: VM%d: old (%x), new (%x), new_physical (%x)\n",
++		vgt->vm_id, old_rrmr, new_rrmr, new_physical_rrmr);
 +	return true;
 +}
 +
@@ -19286,11 +19671,57 @@ index 0000000..cee66c5
 +	return true;
 +}
 +
++static bool shotplug_ctl_mmio_write(struct vgt_device *vgt, unsigned int offset,
++	void *p_data, unsigned int bytes)
++{
++	vgt_reg_t val = *(vgt_reg_t *)p_data;
++	vgt_reg_t sticky_mask = _REGBIT_DP_B_STATUS |
++				_REGBIT_DP_C_STATUS |
++				_REGBIT_DP_D_STATUS;
++
++	__vreg(vgt, offset) = (val & ~sticky_mask) |
++				(__vreg(vgt, offset) & sticky_mask);
++	__vreg(vgt, offset) &= ~(val & sticky_mask);
++
++	__sreg(vgt, offset) = val;
++
++	if (reg_hw_access(vgt, offset)) {
++		vgt_reg_t enable_mask = _REGBIT_DP_B_ENABLE |
++					_REGBIT_DP_C_ENABLE |
++					_REGBIT_DP_D_ENABLE;
++	
++		if (~(val & enable_mask) & enable_mask) {
++			vgt_warn("vGT(%d): Is trying to disable HOTPLUG"
++			" with writing 0x%x to SHOTPLUG_CTL!\n",
++			vgt->vgt_id, val);
++		}
++		/* do not let display owner clear the status bits.
++		 * vgt driver will do so in interrupt handling.
++		 */
++		val &= ~sticky_mask;
++		VGT_MMIO_WRITE(vgt->pdev, offset, val);
++	}
++
++	return true;
++}
++
 +/* Pipe Frame Count */
 +static bool pipe_frmcount_mmio_read(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
-+	return default_passthrough_mmio_read(vgt, offset, p_data, bytes);
++	enum vgt_pipe pipe;
++	bool rc = default_passthrough_mmio_read(vgt, offset, p_data, bytes);
++
++	if (rc && !is_current_display_owner(vgt)) {
++		vgt_reg_t count = *(vgt_reg_t *)p_data;
++		pipe = VGT_FRMCOUNTPIPE(offset);
++		ASSERT(pipe >= PIPE_A && pipe < I915_MAX_PIPES);
++		if ((vgt->pipe_last_vblank[pipe] != 0) && (count < vgt->pipe_last_vblank[pipe])) {
++			*(vgt_reg_t *)p_data = vgt->pipe_last_vblank[pipe] + 1;
++		}
++		vgt->pipe_last_vblank[pipe] = *(vgt_reg_t *)p_data;
++	}
++	return rc;
 +}
 +
 +/* Pipe Display Scan Line*/
@@ -19477,6 +19908,36 @@ index 0000000..cee66c5
 +	return rc;
 +}
 +
++static bool dpy_trans_ddi_ctl_write(struct vgt_device *vgt, unsigned int offset,
++	void *p_data, unsigned int bytes)
++{
++	uint32_t wr_data;
++	int i;
++
++	default_mmio_write(vgt, offset, p_data, bytes);
++
++	wr_data = *((uint32_t *)p_data);
++
++	/* if it is to enable this pipe, then rebuild the mapping for this pipe*/
++	if(vgt->vm_id == 0) {
++		/*when dom0 change the physical pipe/port connection, 
++		we need to rebuild pipe mapping for the vgt device.*/
++		for (i = 0; i < VGT_MAX_VMS; ++ i) {
++			struct vgt_device *vgt_virtual = vgt->pdev->device[i];
++			if (!vgt_virtual || vgt_virtual->vm_id == 0)
++				continue;
++			update_pipe_mapping(vgt_virtual, offset, wr_data);
++		}
++		
++	}
++	else	{
++		rebuild_pipe_mapping(vgt,  offset, wr_data);
++	}
++	
++
++	return true;
++}
++
 +static bool pipe_conf_mmio_write(struct vgt_device *vgt, unsigned int offset,
 +		void *p_data, unsigned int bytes)
 +{
@@ -19496,18 +19957,7 @@ index 0000000..cee66c5
 +	}
 +
 +	rc = default_mmio_write(vgt, offset, &wr_data, bytes);
-+
-+	if (hvm_boot_foreground == true
-+		&& !vgt->hvm_boot_foreground_visible
-+		&& (wr_data & _REGBIT_PIPE_ENABLE)) {
-+		/*
-+		 * Guest have enabled PIPEx on virtual PIPExCONF.
-+		 * So at this point, guest had a vaild surface to show.
-+		 */
-+		vgt->hvm_boot_foreground_visible = 1;
-+		do_vgt_fast_display_switch(vgt);
-+	}
-+
++	vgt_manage_emul_dpy_events(vgt->pdev);
 +	return rc;
 +}
 +
@@ -19519,9 +19969,9 @@ index 0000000..cee66c5
 +
 +	reg_val = *(vgt_reg_t *)p_data;
 +	
-+	// set the RO bit with its original value
++	// set the fully virtualized RO bit with its original value
 +	reg_val = (reg_val & ~_DDI_BUFCTL_DETECT_MASK)
-+		| (__sreg(vgt, offset) & _DDI_BUFCTL_DETECT_MASK);
++		| (__vreg(vgt, offset) & _DDI_BUFCTL_DETECT_MASK);
 +
 +	rc = default_mmio_write(vgt, offset, &reg_val, bytes);
 +
@@ -19679,10 +20129,13 @@ index 0000000..cee66c5
 +	vgt_reg_t sticky_mask;
 +
 +	reg_val = *((vgt_reg_t *)p_data);
-+	sticky_mask = ((1 << BIT_27) | (1 << BIT_26) | (1 << BIT_24)) & reg_val;
++	sticky_mask = (1 << BIT_27) | (1 << BIT_26) | (1 << BIT_24);
 +
-+	__vreg(vgt, offset) &= ~sticky_mask;
-+	__sreg(vgt, offset) &= __vreg(vgt, offset);
++	__vreg(vgt, offset) = (reg_val & ~sticky_mask) |
++				(__vreg(vgt, offset) & sticky_mask);
++	__vreg(vgt, offset) &= ~(reg_val & sticky_mask);
++
++	__sreg(vgt, offset) = reg_val;
 +
 +	if (reg_hw_access(vgt, offset)) {
 +		VGT_MMIO_WRITE(vgt->pdev, offset, reg_val);
@@ -19772,7 +20225,7 @@ index 0000000..cee66c5
 +		else
 +			new &= ~_REGBIT_ADPA_CRT_HOTPLUG_MONITOR_MASK;
 +	} else {
-+		/* ignore the status bits in new value 
++		/* ignore the status bits in new value
 +		 * since they are read only actually
 +		 */
 +		new = (new & ~_REGBIT_ADPA_CRT_HOTPLUG_MONITOR_MASK) |
@@ -19784,141 +20237,19 @@ index 0000000..cee66c5
 +	return true;
 +}
 +
-+static bool dp_ctl_mmio_read(struct vgt_device *vgt, unsigned int offset,
-+			void *p_data, unsigned int bytes)
-+{
-+	unsigned int reg;
-+	vgt_reg_t reg_data;
-+	bool rc;
-+	struct pgt_device *pdev = vgt->pdev;
-+
-+	reg = offset & ~(bytes - 1);
-+
-+	rc = default_mmio_read(vgt, offset, p_data, bytes);
-+	if (reg_hw_access(vgt, reg)) {
-+		reg_data = *(vgt_reg_t *)p_data;
-+		if (reg_data & _REGBIT_DP_PORT_DETECTED) {
-+			switch (reg) {
-+				case _REG_DP_B_CTL:
-+					set_bit(VGT_DP_B, pdev->detected_ports);
-+					break;
-+				case _REG_DP_C_CTL:
-+					set_bit(VGT_DP_C, pdev->detected_ports);
-+					break;
-+				case _REG_DP_D_CTL:
-+					set_bit(VGT_DP_D, pdev->detected_ports);
-+					break;
-+				default:
-+					BUG();
-+			}
-+			vgt_set_all_vreg_bit(pdev, _REGBIT_DP_PORT_DETECTED, reg);
-+		} else {
-+			switch (reg) {
-+				case _REG_DP_B_CTL:
-+					clear_bit(VGT_DP_B, pdev->detected_ports);
-+					break;
-+				case _REG_DP_C_CTL:
-+					clear_bit(VGT_DP_C, pdev->detected_ports);
-+					break;
-+				case _REG_DP_D_CTL:
-+					clear_bit(VGT_DP_D, pdev->detected_ports);
-+					break;
-+				default:
-+					BUG();
-+			}
-+			vgt_clear_all_vreg_bit(pdev, _REGBIT_DP_PORT_DETECTED, reg);
-+		}
-+	}
-+
-+	return rc;
-+}
-+
 +static bool dp_ctl_mmio_write(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
-+	unsigned int reg;
 +	vgt_reg_t vreg_data;
 +	bool rc;
-+	struct pgt_device *pdev = vgt->pdev;
 +
-+	reg = offset & ~(bytes - 1);
 +	vreg_data = *(vgt_reg_t *)p_data;
 +
++	// Keep the fully virtualized RO bit with its original value
++	vreg_data = (vreg_data & ~_REGBIT_DP_PORT_DETECTED)
++			| (__vreg(vgt, offset) & _REGBIT_DP_PORT_DETECTED);
++
 +	rc = default_mmio_write(vgt, offset, p_data, bytes);
-+	/* Read only bit should be keeped coherent with intended hardware status */
-+	switch (reg) {
-+		case _REG_DP_B_CTL:
-+			if (test_bit(VGT_DP_B, pdev->detected_ports))
-+				vreg_data |= _REGBIT_DP_PORT_DETECTED;
-+			else
-+				vreg_data &= ~_REGBIT_DP_PORT_DETECTED;
-+			break;
-+		case _REG_DP_C_CTL:
-+			if (test_bit(VGT_DP_C, pdev->detected_ports))
-+				vreg_data |= _REGBIT_DP_PORT_DETECTED;
-+			else
-+				vreg_data &= ~_REGBIT_DP_PORT_DETECTED;
-+			break;
-+		case _REG_DP_D_CTL:
-+			if (test_bit(VGT_DP_D, pdev->detected_ports))
-+				vreg_data |= _REGBIT_DP_PORT_DETECTED;
-+			else
-+				vreg_data &= ~_REGBIT_DP_PORT_DETECTED;
-+			break;
-+		default:
-+			BUG();
-+	}
-+
-+	__vreg(vgt, reg) = vreg_data;
-+
-+	return rc;
-+}
-+
-+static bool hdmi_ctl_mmio_read(struct vgt_device *vgt, unsigned int offset,
-+			void *p_data, unsigned int bytes)
-+{
-+	unsigned int reg;
-+	vgt_reg_t reg_data;
-+	bool rc;
-+	struct pgt_device *pdev = vgt->pdev;
-+
-+	reg = offset & ~(bytes - 1);
-+
-+	rc = default_mmio_read(vgt, offset, p_data, bytes);
-+	if (reg_hw_access(vgt, reg)) {
-+		reg_data = *(vgt_reg_t *)p_data;
-+		if (reg_data & _REGBIT_HDMI_PORT_DETECTED) {
-+			switch (reg) {
-+				case _REG_HDMI_B_CTL:
-+					set_bit(VGT_HDMI_B, pdev->detected_ports);
-+					break;
-+				case _REG_HDMI_C_CTL:
-+					set_bit(VGT_HDMI_C, pdev->detected_ports);
-+					break;
-+				case _REG_HDMI_D_CTL:
-+					set_bit(VGT_HDMI_D, pdev->detected_ports);
-+					break;
-+				default:
-+					BUG();
-+			}
-+			vgt_set_all_vreg_bit(pdev, _REGBIT_HDMI_PORT_DETECTED, reg);
-+		} else {
-+			switch (reg) {
-+				case _REG_HDMI_B_CTL:
-+					clear_bit(VGT_HDMI_B, pdev->detected_ports);
-+					break;
-+				case _REG_HDMI_C_CTL:
-+					clear_bit(VGT_HDMI_C, pdev->detected_ports);
-+					break;
-+				case _REG_HDMI_D_CTL:
-+					clear_bit(VGT_HDMI_D, pdev->detected_ports);
-+					break;
-+				default:
-+					BUG();
-+			}
-+			vgt_clear_all_vreg_bit(pdev, _REGBIT_HDMI_PORT_DETECTED, reg);
-+		}
-+	}
 +
 +	return rc;
 +}
@@ -19926,52 +20257,98 @@ index 0000000..cee66c5
 +static bool hdmi_ctl_mmio_write(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
-+	unsigned int reg;
 +	vgt_reg_t vreg_data;
 +	bool rc;
-+	struct pgt_device *pdev = vgt->pdev;
 +
-+	reg = offset & ~(bytes - 1);
 +	vreg_data = *(vgt_reg_t *)p_data;
 +
-+	rc = default_mmio_write(vgt, offset, p_data, bytes);
-+	/* Read only bit should be keeped coherent with intended hardware status */
-+	switch (reg) {
-+		case _REG_HDMI_B_CTL:
-+			if (test_bit(VGT_HDMI_B, pdev->detected_ports))
-+				vreg_data |= _REGBIT_HDMI_PORT_DETECTED;
-+			else
-+				vreg_data &= ~_REGBIT_HDMI_PORT_DETECTED;
-+			break;
-+		case _REG_HDMI_C_CTL:
-+			if (test_bit(VGT_HDMI_C, pdev->detected_ports))
-+				vreg_data |= _REGBIT_HDMI_PORT_DETECTED;
-+			else
-+				vreg_data &= ~_REGBIT_HDMI_PORT_DETECTED;
-+			break;
-+		case _REG_HDMI_D_CTL:
-+			if (test_bit(VGT_HDMI_D, pdev->detected_ports))
-+				vreg_data |= _REGBIT_HDMI_PORT_DETECTED;
-+			else
-+				vreg_data &= ~_REGBIT_HDMI_PORT_DETECTED;
-+			break;
-+		default:
-+			BUG();
-+	}
++	// Keep the fully virtualized RO bit with its original value
++	vreg_data = (vreg_data & ~_REGBIT_HDMI_PORT_DETECTED)
++			| (__vreg(vgt, offset) & _REGBIT_HDMI_PORT_DETECTED);
 +
-+	__vreg(vgt, reg) = vreg_data;
++	rc = default_mmio_write(vgt, offset, p_data, bytes);
 +
 +	return rc;
++}
++
++bool vgt_map_plane_reg(struct vgt_device *vgt, unsigned int reg, unsigned int *p_real_reg)
++{
++	enum vgt_pipe virtual_pipe;
++	enum vgt_pipe real_pipe ;
++
++	switch (reg)
++	{
++	case _REG_CURABASE:
++	case _REG_CURACNTR:
++	case _REG_CURAPOS:
++	case _REG_DSPACNTR:
++	case _REG_DSPASURF:
++	case _REG_DSPASURFLIVE:
++	case _REG_DSPALINOFF:
++	case _REG_DSPASTRIDE:
++	case _REG_DSPAPOS:
++	case _REG_DSPASIZE:
++	case _REG_DSPATILEOFF:
++	case _REG_SPRASURF:
++		real_pipe = vgt->pipe_mapping[0];
++		virtual_pipe = PIPE_A;
++		break;
++
++	case _REG_CURBBASE_SNB:
++	case _REG_CURBCNTR_SNB:
++	case _REG_CURBPOS_SNB:
++	case _REG_CURBBASE:
++	case _REG_CURBCNTR:
++	case _REG_CURBPOS:
++	case _REG_DSPBCNTR:
++	case _REG_DSPBSURF:
++	case _REG_DSPBSURFLIVE:
++	case _REG_DSPBLINOFF:
++	case _REG_DSPBSTRIDE:
++	case _REG_DSPBPOS:
++	case _REG_DSPBSIZE:
++	case _REG_DSPBTILEOFF:
++	case _REG_SPRBSURF:
++		real_pipe = vgt->pipe_mapping[1];
++		virtual_pipe = PIPE_B;
++		break;
++
++	case _REG_CURCBASE:
++	case _REG_CURCCNTR:
++	case _REG_CURCPOS:
++	case _REG_DSPCCNTR:
++	case _REG_DSPCSURF:
++	case _REG_DSPCSURFLIVE:
++	case _REG_DSPCLINOFF:
++	case _REG_DSPCSTRIDE:
++	case _REG_DSPCPOS:
++	case _REG_DSPCSIZE:
++	case _REG_DSPCTILEOFF:
++	case _REG_SPRCSURF:
++		real_pipe = vgt->pipe_mapping[2];
++		virtual_pipe = PIPE_C;
++		break;
++
++	default:
++		vgt_warn("try to map mmio that is not plane related! reg = %x\n", reg);
++		ASSERT(0);
++	}
++
++	if(real_pipe == I915_MAX_PIPES)
++	{
++		vgt_warn("the mapping for pipe %d is not ready or created!\n", virtual_pipe);
++		return false;
++	}
++
++	*p_real_reg = reg + 0x1000 * real_pipe - 0x1000 * virtual_pipe;
++
++	return true;
++
 +}
 +
 +static bool dpy_plane_mmio_read(struct vgt_device *vgt, unsigned int offset,
 +			void *p_data, unsigned int bytes)
 +{
-+	if (current_foreground_vm(vgt->pdev) == vgt) {
-+		__sreg(vgt, offset) = VGT_MMIO_READ(vgt->pdev, offset);
-+		__vreg(vgt, offset) = mmio_h2g_gmadr(vgt, offset,
-+							__sreg(vgt, offset));
-+	}
 +
 +	*(vgt_reg_t *)p_data = __vreg(vgt, offset);
 +
@@ -19981,10 +20358,13 @@ index 0000000..cee66c5
 +static bool dpy_plane_mmio_write(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
++	unsigned int real_offset;
++	
 +	memcpy ((char *)vgt->state.vReg + offset, p_data, bytes);
 +	memcpy ((char *)vgt->state.sReg + offset, p_data, bytes);
-+	if (current_foreground_vm(vgt->pdev) == vgt) {
-+		VGT_MMIO_WRITE(vgt->pdev, offset, __sreg(vgt, offset));
++	if (current_foreground_vm(vgt->pdev) == vgt &&
++		vgt_map_plane_reg(vgt, offset, &real_offset)) {
++		VGT_MMIO_WRITE(vgt->pdev, real_offset, __sreg(vgt, offset));
 +	}
 +	return true;
 +}
@@ -20426,43 +20806,101 @@ index 0000000..cee66c5
 +	return rc;
 +}
 +
-+static bool pvinfo_mmio_write(struct vgt_device *vgt, unsigned int offset,
++static bool pvinfo_read(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
-+	vgt_reg_t min;
-+	bool rc = default_mmio_write(vgt, offset, p_data, bytes);
-+	if (rc) {
-+		min = *(vgt_reg_t *)p_data;
-+		switch (offset) {
-+			case vgt_info_off(min_low_gmadr):
-+				if (vgt->aperture_sz < min) {
-+					vgt_err("VM(%d): aperture size(%llx) is less than"
-+						"its driver's minimum requirement(%x)!\n",
-+						vgt->vm_id, vgt->aperture_sz, min);
-+					rc = false;
-+				}
-+				break;
-+			case vgt_info_off(min_high_gmadr):
-+				if (vgt->gm_sz - vgt->aperture_sz < min) {
-+					vgt_err("VM(%d): hiden gm size(%llx) is less than"
-+						"its driver's minimum requirement(%x)!\n",
-+						vgt->vm_id, vgt->gm_sz - vgt->aperture_sz,
-+					        min);
-+					rc = false;
-+				}
-+				break;
-+			case vgt_info_off(min_fence_num):
-+				if (vgt->fence_sz < min) {
-+					vgt_err("VM(%d): fence size(%x) is less than"
-+						"its drivers minimum requirement(%x)!\n",
-+						vgt->vm_id, vgt->fence_sz, min);
-+					rc = false;
-+				}
-+				break;
-+			default:
-+				break;
-+		}
++	bool rc = default_mmio_read(vgt, offset, p_data, bytes);
++	bool invalid_read = false;
++
++	switch (offset) {
++		case vgt_info_off(magic) ... vgt_info_off(vgt_id):
++			if (offset + bytes > vgt_info_off(vgt_id) + 4)
++				invalid_read = true;
++			break;
++
++		case vgt_info_off(avail_rs.low_gmadr.my_base) ...
++			vgt_info_off(avail_rs.fence_num):
++			if (offset + bytes >
++				vgt_info_off(avail_rs.fence_num) + 4)
++				invalid_read = true;
++			break;
++
++		case vgt_info_off(drv_version_major) ...
++			vgt_info_off(min_fence_num):
++			if (offset + bytes > vgt_info_off(min_fence_num) + 4)
++				invalid_read = true;
++			break;
++		default:
++			invalid_read = true;
++			break;
 +	}
++
++	if (invalid_read)
++		vgt_warn("invalid pvinfo read: [%x:%x] = %x!!!\n",
++			offset, bytes, *(vgt_reg_t *)p_data);
++
++	return rc;
++}
++
++static bool pvinfo_write(struct vgt_device *vgt, unsigned int offset,
++	void *p_data, unsigned int bytes)
++{
++	vgt_reg_t val = *(vgt_reg_t *)p_data;
++	vgt_reg_t min;
++	bool rc = true;
++
++	switch (offset) {
++		case vgt_info_off(min_low_gmadr):
++			min = val;
++			if (vgt->aperture_sz < min) {
++				vgt_err("VM(%d): aperture size(%llx) is less than"
++					"its driver's minimum requirement(%x)!\n",
++					vgt->vm_id, vgt->aperture_sz, min);
++				rc = false;
++			}
++			break;
++		case vgt_info_off(min_high_gmadr):
++			min = val;
++			if (vgt->gm_sz - vgt->aperture_sz < min) {
++				vgt_err("VM(%d): hiden gm size(%llx) is less than"
++					"its driver's minimum requirement(%x)!\n",
++					vgt->vm_id, vgt->gm_sz - vgt->aperture_sz,
++				        min);
++				rc = false;
++			}
++			break;
++		case vgt_info_off(min_fence_num):
++			min = val;
++			if (vgt->fence_sz < min) {
++				vgt_err("VM(%d): fence size(%x) is less than"
++					"its drivers minimum requirement(%x)!\n",
++					vgt->vm_id, vgt->fence_sz, min);
++				rc = false;
++			}
++			break;
++		case vgt_info_off(display_ready):
++			if (vgt->vm_id
++				&& hvm_boot_foreground == true
++				&& !vgt->hvm_boot_foreground_visible) {
++				/*
++				 * Guest had a vaild surface to show.
++				 */
++				vgt->hvm_boot_foreground_visible = 1;
++				do_vgt_fast_display_switch(vgt);
++			}
++			break;
++		default:
++			/* keep rc's default value: true.
++			 * NOTE: returning false will crash the VM.
++			 */
++			vgt_warn("invalid pvinfo write: [%x:%x] = %x!!!\n",
++				offset, bytes, val);
++			break;
++	}
++
++	if (rc == true)
++		 rc = default_mmio_write(vgt, offset, p_data, bytes);
++
 +	return rc;
 +}
 +/*
@@ -20524,10 +20962,10 @@ index 0000000..cee66c5
 +{_REG_VCS_EXCC, 4, F_RDR, 0, D_ALL, NULL, NULL},
 +{_REG_BCS_EXCC, 4, F_RDR, 0, D_ALL, NULL, NULL},
 +{_REG_VECS_EXCC, 4, F_RDR, 0, D_HSW, NULL, NULL},
-+{_REG_RCS_UHPTR, 4, F_RDR_HWSTS, 0, D_ALL, NULL, NULL},
-+{_REG_VCS_UHPTR, 4, F_RDR_HWSTS, 0, D_ALL, NULL, NULL},
-+{_REG_BCS_UHPTR, 4, F_RDR_HWSTS, 0, D_ALL, NULL, NULL},
-+{_REG_VECS_UHPTR, 4, F_RDR_HWSTS, 0, D_HSW_PLUS, NULL, NULL},
++{_REG_RCS_UHPTR, 4, F_RDR_HWSTS, 0, D_ALL, NULL, ring_uhptr_write},
++{_REG_VCS_UHPTR, 4, F_RDR_HWSTS, 0, D_ALL, NULL, ring_uhptr_write},
++{_REG_BCS_UHPTR, 4, F_RDR_HWSTS, 0, D_ALL, NULL, ring_uhptr_write},
++{_REG_VECS_UHPTR, 4, F_RDR_HWSTS, 0, D_HSW_PLUS, NULL, ring_uhptr_write},
 +{_REG_RCS_BB_PREEMPT_ADDR, 4, F_RDR_ADRFIX, 0xFFFFF000, D_ALL, NULL, NULL},
 +{_REG_CCID, 4, F_RDR_ADRFIX, 0xFFFFF000, D_ALL, NULL, NULL},
 +{0x12198, 4, F_RDR_ADRFIX, 0xFFFFF000, D_ALL, NULL, NULL},
@@ -20657,9 +21095,9 @@ index 0000000..cee66c5
 +{_REG_SDEIMR, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_imr_handler},
 +{_REG_SDEIER, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_ier_handler},
 +{_REG_SDEIIR, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_iir_handler},
-+{_REG_SDEISR, 4, F_VIRT, 0, D_ALL, NULL, NULL},
++{_REG_SDEISR, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_isr_handler},
 +
-+{_REG_DE_RRMR, 4, F_PT, 0, D_ALL, NULL, NULL},
++{_REG_DE_RRMR, 4, F_VIRT, 0, D_ALL, NULL, rrmr_mmio_write},
 +
 +{_REG_PIPEADSL, 4, F_DPY, 0, D_ALL, pipe_dsl_mmio_read, NULL},
 +{_REG_PIPEACONF, 4, F_DPY, 0, D_ALL, NULL, pipe_conf_mmio_write},
@@ -20676,6 +21114,8 @@ index 0000000..cee66c5
 +{_REG_PIPECCONF, 4, F_DPY, 0, D_HSW, NULL, pipe_conf_mmio_write},
 +{_REG_PIPECSTAT, 4, F_DPY, 0, D_HSW, NULL, NULL},
 +{_REG_PIPEC_FRMCOUNT, 4, F_DPY, 0, D_HSW, pipe_frmcount_mmio_read, NULL},
++
++{_REG_PIPE_EDP_CONF, 4, F_DPY, 0, D_HSW, NULL, pipe_conf_mmio_write},
 +
 +{_REG_CURABASE, 4, F_DPY_ADRFIX, 0xFFFFF000, D_ALL, dpy_plane_mmio_read,
 +						dpy_plane_mmio_write},
@@ -20722,6 +21162,8 @@ index 0000000..cee66c5
 +{0x700D4, 4, F_DPY, 0, D_SNB, NULL, NULL},
 +{0x700D8, 4, F_DPY, 0, D_SNB, NULL, NULL},
 +{0x700DC, 4, F_DPY, 0, D_SNB, NULL, NULL},
++
++{0x701b0, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 +
 +{_REG_DSPACNTR, 4, F_DPY, 0, D_ALL, dpy_plane_mmio_read,
 +							dpy_plane_mmio_write},
@@ -20938,12 +21380,12 @@ index 0000000..cee66c5
 +	dp_aux_ch_ctl_mmio_read, dp_aux_ch_ctl_mmio_write},
 +
 +{_REG_PCH_ADPA, 4, F_DPY, 0, D_ALL, pch_adpa_mmio_read, pch_adpa_mmio_write},
-+{_REG_DP_B_CTL, 4, F_DPY, 0, D_ALL, dp_ctl_mmio_read, dp_ctl_mmio_write},
-+{_REG_DP_C_CTL, 4, F_DPY, 0, D_ALL, dp_ctl_mmio_read, dp_ctl_mmio_write},
-+{_REG_DP_D_CTL, 4, F_DPY, 0, D_ALL, dp_ctl_mmio_read, dp_ctl_mmio_write},
-+{_REG_HDMI_B_CTL, 4, F_DPY, 0, D_ALL, hdmi_ctl_mmio_read, hdmi_ctl_mmio_write},
-+{_REG_HDMI_C_CTL, 4, F_DPY, 0, D_ALL, hdmi_ctl_mmio_read, hdmi_ctl_mmio_write},
-+{_REG_HDMI_D_CTL, 4, F_DPY, 0, D_ALL, hdmi_ctl_mmio_read, hdmi_ctl_mmio_write},
++{_REG_DP_B_CTL, 4, F_DPY, 0, D_SNB|D_IVB, NULL, dp_ctl_mmio_write},
++{_REG_DP_C_CTL, 4, F_DPY, 0, D_SNB|D_IVB, NULL, dp_ctl_mmio_write},
++{_REG_DP_D_CTL, 4, F_DPY, 0, D_SNB|D_IVB, NULL, dp_ctl_mmio_write},
++{_REG_HDMI_B_CTL, 4, F_DPY, 0, D_SNB|D_IVB, NULL, hdmi_ctl_mmio_write},
++{_REG_HDMI_C_CTL, 4, F_DPY, 0, D_SNB|D_IVB, NULL, hdmi_ctl_mmio_write},
++{_REG_HDMI_D_CTL, 4, F_DPY, 0, D_SNB|D_IVB, NULL, hdmi_ctl_mmio_write},
 +{_REG_TRANSACONF, 4, F_DPY, 0, D_ALL, NULL, transaconf_mmio_write},
 +{_REG_TRANSBCONF, 4, F_DPY, 0, D_ALL, NULL, transaconf_mmio_write},
 +{_REG_FDI_RXA_IIR, 4, F_DPY, 0, D_ALL, NULL, fdi_rx_iir_mmio_write},
@@ -21031,7 +21473,7 @@ index 0000000..cee66c5
 +	dpy_reg_mmio_read_2, NULL},
 +{0xE6E1C, 4, F_DPY, 0, D_ALL,
 +	dpy_reg_mmio_read_3, NULL},
-+{_REG_SHOTPLUG_CTL, 4, F_DPY, 0, D_ALL, NULL, NULL},
++{_REG_SHOTPLUG_CTL, 4, F_DPY, 0, D_ALL, NULL, shotplug_ctl_mmio_write},
 +{_REG_LCPLL_CTL, 4, F_DPY, 0, D_HSW, NULL, NULL},
 +{_REG_HSW_FUSE_STRAP, 4, F_DPY, 0, D_HSW, NULL, NULL},
 +{_REG_DP_A_HOTPLUG_CNTL, 4, F_DPY, 0, D_HSW, NULL, NULL},
@@ -21154,10 +21596,10 @@ index 0000000..cee66c5
 +{0x6661c, 4, F_DPY, 0, D_HSW, NULL, NULL},
 +{0x66C00, 8, F_DPY, 0, D_HSW, NULL, NULL},
 +
-+{_REG_TRANS_DDI_FUNC_CTL_A, 4, F_DPY, 0, D_HSW, NULL, NULL},
-+{_REG_TRANS_DDI_FUNC_CTL_B, 4, F_DPY, 0, D_HSW, NULL, NULL},
-+{_REG_TRANS_DDI_FUNC_CTL_C, 4, F_DPY, 0, D_HSW, NULL, NULL},
-+{_REG_TRANS_DDI_FUNC_CTL_EDP, 4, F_DPY, 0, D_HSW, NULL, NULL},
++{_REG_TRANS_DDI_FUNC_CTL_A, 4, F_DPY, 0, D_HSW, NULL, dpy_trans_ddi_ctl_write},
++{_REG_TRANS_DDI_FUNC_CTL_B, 4, F_DPY, 0, D_HSW, NULL, dpy_trans_ddi_ctl_write},
++{_REG_TRANS_DDI_FUNC_CTL_C, 4, F_DPY, 0, D_HSW, NULL, dpy_trans_ddi_ctl_write},
++{_REG_TRANS_DDI_FUNC_CTL_EDP, 4, F_DPY, 0, D_HSW, NULL, dpy_trans_ddi_ctl_write},
 +
 +{_REG_TRANS_MSA_MISC_A, 4, F_DPY, 0, D_HSW, NULL, NULL},
 +{_REG_TRANS_MSA_MISC_B, 4, F_DPY, 0, D_HSW, NULL, NULL},
@@ -21218,7 +21660,7 @@ index 0000000..cee66c5
 +
 +{_REG_GEN6_GDRST, 4, F_VIRT, 0, D_ALL, NULL, gen6_gdrst_mmio_write},
 +{_REG_FENCE_0_LOW, 0x80, F_VIRT, 0, D_ALL, fence_mmio_read, fence_mmio_write},
-+{VGT_PVINFO_PAGE, VGT_PVINFO_SIZE, F_VIRT, 0, D_ALL, NULL, pvinfo_mmio_write},
++{VGT_PVINFO_PAGE, VGT_PVINFO_SIZE, F_VIRT, 0, D_ALL, pvinfo_read, pvinfo_write},
 +{_REG_CPU_VGACNTRL, 4, F_DOM0, 0, D_ALL, vga_control_r, vga_control_w},
 +
 +/* TODO: MCHBAR, suppose read-only */
@@ -21477,10 +21919,10 @@ index 0000000..cee66c5
 +}
 diff --git a/drivers/xen/vgt/hypercall.c b/drivers/xen/vgt/hypercall.c
 new file mode 100644
-index 0000000..e752e3a
+index 0000000..a247b1a
 --- /dev/null
 +++ b/drivers/xen/vgt/hypercall.c
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,479 @@
 +/*
 + * Interfaces coupled to Xen
 + *
@@ -21607,9 +22049,9 @@ index 0000000..e752e3a
 +}
 +
 +/*
-+ * Map the apperture space (BAR1) of vGT device for direct access.
++ * Map the aperture space (BAR1) of vGT device for direct access.
 + */
-+int vgt_hvm_map_apperture (struct vgt_device *vgt, int map)
++int vgt_hvm_map_aperture (struct vgt_device *vgt, int map)
 +{
 +	char *cfg_space = &vgt->state.cfg_space[0];
 +	uint64_t bar_s;
@@ -21648,11 +22090,27 @@ index 0000000..e752e3a
 +	r = HYPERVISOR_hvm_op(HVMOP_vgt_map_mmio, &memmap);
 +
 +	if (r != 0)
-+		printk(KERN_ERR "vgt_hvm_map_apperture fail with %d!\n", r);
++		printk(KERN_ERR "vgt_hvm_map_aperture fail with %d!\n", r);
 +	else
 +		vgt->state.bar_mapped[1] = map;
 +
 +	return r;
++}
++
++int vgt_io_trap(struct xen_domctl *ctl)
++{
++	int r;
++
++	ctl->cmd = XEN_DOMCTL_vgt_io_trap;
++	ctl->interface_version = XEN_DOMCTL_INTERFACE_VERSION;
++
++	r = HYPERVISOR_domctl(ctl);
++	if (r) {
++		printk(KERN_ERR "%s(): HYPERVISOR_domctl fail: %d\n", __func__, r);
++		return r;
++	}
++
++	return 0;
 +}
 +
 +/*
@@ -21660,20 +22118,26 @@ index 0000000..e752e3a
 + */
 +int vgt_hvm_set_trap_area(struct vgt_device *vgt)
 +{
++	struct xen_domctl domctl;
++	struct xen_domctl_vgt_io_trap *info = &domctl.u.vgt_io_trap;
++
 +	char *cfg_space = &vgt->state.cfg_space[0];
-+	struct xen_hvm_vgt_set_trap_io trap;
 +	uint64_t bar_s, bar_e;
++
 +	int r;
 +
 +	if (!vgt_pci_mmio_is_enabled(vgt))
 +		return 0;
 +
-+	trap.domid = vgt->vm_id;
-+	trap.nr_pio_frags = 0;
-+	trap.nr_mmio_frags = 1;
++	domctl.domain = vgt->vm_id;
++	domctl.cmd = XEN_DOMCTL_vgt_io_trap;
++	domctl.interface_version = XEN_DOMCTL_INTERFACE_VERSION;
++
++	info->n_pio = 0;
++	info->n_mmio = 1;
 +
 +	cfg_space += VGT_REG_CFG_SPACE_BAR0;
-+	if (VGT_GET_BITS(*cfg_space, 2, 1) == 2){
++	if (VGT_GET_BITS(*cfg_space, 2, 1) == 2) {
 +		/* 64 bits MMIO bar */
 +		bar_s = * (uint64_t *) cfg_space;
 +	} else {
@@ -21684,15 +22148,15 @@ index 0000000..e752e3a
 +	bar_s &= ~0xF; /* clear the LSB 4 bits */
 +	bar_e = bar_s + vgt->state.bar_size[0] - 1;
 +
-+	trap.mmio_frags[0].s = bar_s;
-+	trap.mmio_frags[0].e = bar_e;
++	info->mmio[0].s = bar_s;
++	info->mmio[0].e = bar_e;
 +
-+	r = HYPERVISOR_hvm_op(HVMOP_vgt_set_trap_io, &trap);
-+	if (r < 0) {
-+		printk(KERN_ERR "HVMOP_vgt_set_trap_io %d!\n",
-+			r);
++	r = HYPERVISOR_domctl(&domctl);
++	if (r) {
++		printk(KERN_ERR "VGT: %s(): fail to trap area: %d.\n", __func__, r);
 +		return r;
 +	}
++
 +	return r;
 +}
 +
@@ -21746,7 +22210,7 @@ index 0000000..e752e3a
 +
 +int vgt_hvm_vmem_init(struct vgt_device *vgt)
 +{
-+	unsigned long i, j, count;
++	unsigned long i, j, gpfn, count;
 +	unsigned long nr_low_1mb_bkt, nr_high_bkt, nr_high_4k_bkt;
 +
 +	/* Dom0 already has mapping for itself */
@@ -21797,8 +22261,9 @@ index 0000000..e752e3a
 +	count = 0;
 +	/* map the >1MB memory */
 +	for (i = 1; i < nr_high_bkt; i++) {
++		gpfn = i << (VMEM_BUCK_SHIFT - PAGE_SHIFT);
 +		vgt->vmem_vma[i] = xen_remap_domain_mfn_range_in_kernel(
-+				i << (VMEM_BUCK_SHIFT - PAGE_SHIFT),
++				gpfn,
 +				VMEM_BUCK_SIZE >> PAGE_SHIFT,
 +				vgt->vm_id);
 +
@@ -21806,7 +22271,13 @@ index 0000000..e752e3a
 +			continue;
 +
 +
-+		for (j = (i << (VMEM_BUCK_SHIFT - PAGE_SHIFT));
++		/* for <4G GPFNs: skip the hole after low_mem_max_gpfn */
++		if (gpfn < (1 << (32 - PAGE_SHIFT)) &&
++			vgt->low_mem_max_gpfn != 0 &&
++			gpfn > vgt->low_mem_max_gpfn)
++			continue;
++
++		for (j = gpfn;
 +		     j < ((i + 1) << (VMEM_BUCK_SHIFT - PAGE_SHIFT));
 +		     j++) { 
 +			vgt->vmem_vma_4k[j] =
@@ -21917,8 +22388,12 @@ index 0000000..e752e3a
 +
 +	if (!vgt->vmem_vma[buck_index]) {
 +		buck_4k_index = gpa >> PAGE_SHIFT;
-+		if (!vgt->vmem_vma_4k[buck_4k_index])
++		if (!vgt->vmem_vma_4k[buck_4k_index]) {
++			if (buck_4k_index > vgt->low_mem_max_gpfn)
++				vgt_err("vGT failed to map gpa=0x%lx?\n", gpa);
 +			return NULL;
++		}
++
 +		return (char*)(vgt->vmem_vma_4k[buck_4k_index]->addr) +
 +			(gpa & ~PAGE_MASK);
 +	}
@@ -21929,10 +22404,10 @@ index 0000000..e752e3a
 +
 diff --git a/drivers/xen/vgt/instance.c b/drivers/xen/vgt/instance.c
 new file mode 100644
-index 0000000..c9bf4b7
+index 0000000..bb62b68
 --- /dev/null
 +++ b/drivers/xen/vgt/instance.c
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,416 @@
 +/*
 + * Instance life-cycle management
 + *
@@ -22016,8 +22491,8 @@ index 0000000..c9bf4b7
 +
 +	vgt_dbg("create_state_instance\n");
 +	state = &vgt->state;
-+	state->vReg = vmalloc(vgt->pdev->mmio_size);
-+	state->sReg = vmalloc(vgt->pdev->mmio_size);
++	state->vReg = vzalloc(vgt->pdev->mmio_size);
++	state->sReg = vzalloc(vgt->pdev->mmio_size);
 +	if ( state->vReg == NULL || state->sReg == NULL )
 +	{
 +		printk("VGT: insufficient memory allocation at %s\n", __FUNCTION__);
@@ -22028,6 +22503,9 @@ index 0000000..c9bf4b7
 +		state->sReg = state->vReg = NULL;
 +		return -ENOMEM;
 +	}
++	for (i = 0; i < I915_MAX_PIPES; i++)
++		vgt_set_pipe_mapping(vgt, i,
++			vgt->vm_id == 0 ? i : I915_MAX_PIPES);
 +
 +	for (i = 0; i < VGT_BAR_NUM; i++)
 +		state->bar_mapped[i] = 0;
@@ -22174,6 +22652,8 @@ index 0000000..c9bf4b7
 +			vgt_visible_gm_base(vgt), vgt_aperture_sz(vgt),
 +			vgt_hidden_gm_base(vgt), vgt_hidden_gm_sz(vgt),
 +			vgt->fence_base, vgt->fence_sz);
++
++		ASSERT(sizeof(struct vgt_if) == VGT_PVINFO_SIZE);
 +	}
 +
 +	vgt->bypass_addr_check = bypass_dom0_addr_check && (vgt->vm_id == 0);
@@ -22230,6 +22710,7 @@ index 0000000..c9bf4b7
 +	vgt_init_aux_ch_vregs(&vgt->vgt_i2c_bus, vgt->state.vReg);
 +	vgt_propagate_edid(vgt, -1);
 +	vgt_propagate_dpcd(vgt, -1);
++	vgt_update_monitor_status(vgt);
 +
 +	*ptr_vgt = vgt;
 +
@@ -22345,10 +22826,10 @@ index 0000000..c9bf4b7
 +
 diff --git a/drivers/xen/vgt/interrupt.c b/drivers/xen/vgt/interrupt.c
 new file mode 100644
-index 0000000..1d3c42c
+index 0000000..b13411a
 --- /dev/null
 +++ b/drivers/xen/vgt/interrupt.c
-@@ -0,0 +1,1125 @@
+@@ -0,0 +1,1331 @@
 +/*
 + * vGT interrupt handler
 + *
@@ -22524,7 +23005,7 @@ index 0000000..1d3c42c
 + * as long as a VM wants it. This is safe because we still use a single
 + * big lock for all critical paths, but not efficient.
 + */
-+static u32 vgt_recalculate_imr(struct pgt_device *pdev, unsigned int reg)
++u32 vgt_recalculate_mask_bits(struct pgt_device *pdev, unsigned int reg)
 +{
 +	int i;
 +	u32 imr = 0xffffffff;
@@ -22585,7 +23066,7 @@ index 0000000..1d3c42c
 +	__vreg(vgt, reg) = imr;
 +
 +	if (changed) {
-+		new_imr = vgt_recalculate_imr(pdev, reg);
++		new_imr = vgt_recalculate_mask_bits(pdev, reg);
 +		/*
 +		 * may optimize by caching the old imr, and then only update
 +		 * pReg when AND-ed value changes. but that requires link to
@@ -22615,6 +23096,12 @@ index 0000000..1d3c42c
 +
 +	vgt_dbg("IRQ: old vIER(%x), pIER(%x)\n",
 +		 __vreg(vgt, reg), VGT_MMIO_READ(pdev, reg));
++
++	if (!vgt->vgt_id && __get_cpu_var(in_vgt) != 1) {
++		vgt_err("i915 virq happens in nested vgt context(%d)!!!\n",
++			__get_cpu_var(in_vgt));
++		ASSERT(0);
++	}
 +
 +	/* figure out newly enabled/disable bits */
 +	changed = __vreg(vgt, reg) ^ ier;
@@ -22655,18 +23142,110 @@ index 0000000..1d3c42c
 +	return true;
 +}
 +
++bool vgt_reg_isr_handler(struct vgt_device *vgt, unsigned int reg,
++	void *p_data, unsigned int bytes)
++{
++	vgt_dbg("IRQ: capture ISR write on reg (%x) with val (%x)." \
++		" Will be ignored!\n", reg, *(vgt_reg_t *)p_data);
++
++	return true;
++}
++
 +/* =======================vEvent injection===================== */
 +
-+static void inject_dom0_virtual_interrupt(struct vgt_device *vgt)
++/*
++ * dom0 virtual interrupt can only be pended here. Immediate
++ * injection at this point may cause race condition on nested
++ * lock, regardless of whether the target vcpu is the current
++ * or not.
++ */
++static void pend_dom0_virtual_interrupt(struct vgt_device *vgt)
++{
++	struct pgt_device *pdev = vgt->pdev;
++
++	ASSERT(spin_is_locked(&pdev->lock));
++
++	if (pdev->dom0_irq_pending)
++		return;
++
++	/*
++	 * set current cpu to do delayed check, wchih may
++	 * trigger ipi call function but at this piont irq
++	 * may be disabled already.
++	 */
++	pdev->dom0_irq_cpu = smp_processor_id();
++	wmb();
++	pdev->dom0_irq_pending = true;
++
++	/* TODO: may do a kick here */
++}
++
++static DEFINE_PER_CPU(struct call_single_data, vgt_call_data) = {
++	.func = inject_dom0_virtual_interrupt,
++};
++
++/*
++ * actual virq injection happens here. called in vgt_exit()
++ * or IPI handler
++ */
++void inject_dom0_virtual_interrupt(void *info)
 +{
 +	unsigned long flags;
-+	int i915_irq = vgt->pdev->irq_hstate->i915_irq;
++	struct pgt_device *pdev = &default_device;
++	int i915_irq;
++	int this_cpu, target_cpu;
 +
-+	vgt_dbg("vGT: resend irq for dom0\n");
-+	/* resend irq may unmask events which requires irq disabled */
-+	local_irq_save(flags);
-+	resend_irq_on_evtchn(i915_irq);
-+	local_irq_restore(flags);
++	/* still in vgt. the injection will happen later */
++	if (__get_cpu_var(in_vgt))
++		return;
++
++	spin_lock_irqsave(&pdev->lock, flags);
++	if (!pdev->dom0_irq_pending) {
++		spin_unlock_irqrestore(&pdev->lock, flags);
++		return;
++	}
++
++	ASSERT(pdev->dom0_irq_cpu != -1);
++	this_cpu = smp_processor_id();
++	if (this_cpu != pdev->dom0_irq_cpu) {
++		spin_unlock_irqrestore(&pdev->lock, flags);
++		return;
++	}
++
++	i915_irq = pdev->irq_hstate->i915_irq;
++	target_cpu = xen_get_cpu_from_irq(i915_irq);
++
++	/*
++	 * If target cpu is the current, notify cpu by resending
++	 * evtchn. Later interrupt enable will make it fired
++	 *
++	 * Otherwise, we need check whether the target cpu is
++	 * in vgt core logic, which may have lock acquired. In
++	 * that case, no further action except adjusting target
++	 * cpu, because pending irq will be handled when target
++	 * vcpu does vgt_exit().
++	 *
++	 * the only case we need to kick the target cpu, is when
++	 * it's not in vgt code path. An IPI is sent to make the
++	 * target cpu note the pending irq;
++	 */
++	if (this_cpu == target_cpu) {
++		pdev->dom0_irq_pending = false;
++		wmb();
++		pdev->dom0_irq_cpu = -1;
++
++		resend_irq_on_evtchn(i915_irq);
++		spin_unlock_irqrestore(&pdev->lock, flags);
++	} else {
++		pdev->dom0_irq_cpu = target_cpu;
++		spin_unlock_irqrestore(&pdev->lock, flags);
++
++		/* do this out of the lock */
++		if (!per_cpu(in_vgt, target_cpu)) {
++			__smp_call_function_single(target_cpu,
++				&per_cpu(vgt_call_data, this_cpu), 0); 
++		}
++	}
 +}
 +
 +#define MSI_CAP_OFFSET 0x90	/* FIXME. need to get from cfg emulation */
@@ -22697,7 +23276,7 @@ index 0000000..1d3c42c
 +	if (vgt->vm_id)
 +		inject_hvm_virtual_interrupt(vgt);
 +	else
-+		inject_dom0_virtual_interrupt(vgt);
++		pend_dom0_virtual_interrupt(vgt);
 +
 +	vgt->stat.irq_num++;
 +	vgt->stat.last_injection = get_cycles();
@@ -22960,18 +23539,20 @@ index 0000000..1d3c42c
 +	}
 +}
 +
++#define IIR_WRITE_MAX	5
++
 +/* base interrupt handler, for snb/ivb/hsw */
 +static irqreturn_t vgt_base_irq_handler(struct vgt_irq_host_state *hstate)
 +{
 +	u32 gt_iir, pm_iir, de_iir, pch_iir, de_iir_tmp;
 +	int pch_bit;
++	int count = 0;
 +	struct pgt_device *pdev = hstate->pdev;
 +
 +	/* read physical IIRs */
 +	gt_iir = VGT_MMIO_READ(pdev, _REG_GTIIR);
 +	de_iir = VGT_MMIO_READ(pdev, _REG_DEIIR);
 +	pm_iir = VGT_MMIO_READ(pdev, _REG_PMIIR);
-+	pch_iir = VGT_MMIO_READ(pdev, _REG_SDEIIR);
 +
 +	if (!gt_iir && !de_iir && !pm_iir)
 +		return IRQ_NONE;
@@ -22986,8 +23567,14 @@ index 0000000..1d3c42c
 +	vgt_handle_events(hstate, &pm_iir, IRQ_INFO_PM);
 +
 +	if (de_iir & (1 << pch_bit)) {
++		pch_iir = VGT_MMIO_READ(pdev, _REG_SDEIIR);
 +		vgt_handle_events(hstate, &pch_iir, IRQ_INFO_PCH);
-+		VGT_MMIO_WRITE(pdev, _REG_SDEIIR, pch_iir);
++
++		while((count < IIR_WRITE_MAX) && (pch_iir != 0)) {
++			VGT_MMIO_WRITE(pdev, _REG_SDEIIR, pch_iir);
++			pch_iir = VGT_MMIO_READ(pdev, _REG_SDEIIR);
++			count ++;
++		}
 +	}
 +
 +	VGT_MMIO_WRITE(pdev, _REG_GTIIR, gt_iir);
@@ -23188,6 +23775,42 @@ index 0000000..1d3c42c
 +	pdev->stat.virq_cycles += get_cycles() - pdev->stat.last_virq;
 +}
 +
++#define NEED_VIRT_INT_FOR_PIPE(vgt, pipe)		\
++	(vgt_has_pipe_enabled(vgt, pipe) &&		\
++	!pdev_has_pipe_enabled(vgt->pdev, pipe))
++
++/*TODO
++ * In vgt_emulate_dpy_events(), so far only one virtual virtual
++ * event is injected into VM. If more than one events are injected, we
++ * should use a new function other than vgt_trigger_virtual_event(),
++ * that new one can combine multiple virtual events into a single
++ * virtual interrupt.
++ */
++void vgt_emulate_dpy_events(struct pgt_device *pdev)
++{
++	int i;
++
++	ASSERT(spin_is_locked(&pdev->lock));
++	for (i = 0; i < VGT_MAX_VMS; i ++) {
++		struct vgt_device *vgt = pdev->device[i];
++
++		if (!vgt || is_current_display_owner(vgt))
++			continue;
++
++		if (NEED_VIRT_INT_FOR_PIPE(vgt, PIPE_A)) {
++			vgt_trigger_virtual_event(vgt, PIPE_A_VBLANK);
++		}
++
++		if (NEED_VIRT_INT_FOR_PIPE(vgt, PIPE_B)) {
++			vgt_trigger_virtual_event(vgt, PIPE_B_VBLANK);
++		}
++
++		if (NEED_VIRT_INT_FOR_PIPE(vgt, PIPE_C)) {
++			vgt_trigger_virtual_event(vgt, PIPE_C_VBLANK);
++		}
++	}
++}
++
 +/*
 + * Scan all pending events in the specified category, and then invoke
 + * registered handler accordingly
@@ -23232,6 +23855,9 @@ index 0000000..1d3c42c
 +	struct vgt_irq_host_state *hstate = pdev->irq_hstate;
 +	u32 de_ier;
 +	irqreturn_t ret;
++	int cpu;
++
++	cpu = vgt_enter();
 +
 +	pdev->stat.irq_num++;
 +	pdev->stat.last_pirq = get_cycles();
@@ -23261,6 +23887,8 @@ index 0000000..1d3c42c
 +	spin_unlock(&pdev->lock);
 +
 +	pdev->stat.pirq_cycles += get_cycles() - pdev->stat.last_pirq;
++
++	vgt_exit(cpu);
 +	return IRQ_HANDLED;
 +}
 +
@@ -23341,12 +23969,29 @@ index 0000000..1d3c42c
 +	SET_POLICY_NONE(hstate, GMBUS);
 +}
 +
++static enum hrtimer_restart vgt_dpy_timer_fn(struct hrtimer *data)
++{
++	struct vgt_emul_timer *dpy_timer;
++	struct vgt_irq_host_state *hstate;
++	struct pgt_device *pdev;
++
++	dpy_timer = container_of(data, struct vgt_emul_timer, timer);
++	hstate = container_of(dpy_timer, struct vgt_irq_host_state, dpy_timer);
++	pdev = hstate->pdev;
++
++	vgt_raise_request(pdev, VGT_REQUEST_EMUL_DPY_EVENTS);
++
++	hrtimer_add_expires_ns(&dpy_timer->timer, dpy_timer->period);
++	return HRTIMER_RESTART;
++}
++
 +/*
 + * Do interrupt initialization for vGT driver
 + */
 +int vgt_irq_init(struct pgt_device *pdev)
 +{
 +	struct vgt_irq_host_state *hstate;
++	struct vgt_emul_timer *dpy_timer;
 +
 +	hstate = kzalloc(sizeof(struct vgt_irq_host_state), GFP_KERNEL);
 +	if (hstate == NULL)
@@ -23371,13 +24016,55 @@ index 0000000..1d3c42c
 +	hstate->ops->init_irq(hstate);
 +
 +	pdev->irq_hstate = hstate;
-+	vgt_dbg("Interrupt initialization completes\n");
++	pdev->dom0_irq_cpu = -1;
++	pdev->dom0_irq_pending = false;
++
++	dpy_timer = &hstate->dpy_timer;
++	hrtimer_init(&dpy_timer->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
++	dpy_timer->timer.function = vgt_dpy_timer_fn;
++	dpy_timer->period = VGT_DPY_EMUL_PERIOD;
++
 +	return 0;
++}
++
++void vgt_manage_emul_dpy_events(struct pgt_device *pdev)
++{
++	int i;
++	enum vgt_pipe pipe;
++	unsigned hw_enabled_pipes, hvm_enabled_pipes;
++	struct vgt_irq_host_state *hstate = pdev->irq_hstate;
++
++
++	ASSERT(spin_is_locked(&pdev->lock));
++	hw_enabled_pipes = hvm_enabled_pipes = 0;
++
++	for (i = 0; i < VGT_MAX_VMS && pdev->device[i]; i ++) {
++		struct vgt_device *vgt = pdev->device[i];
++		for (pipe = PIPE_A; pipe < I915_MAX_PIPES; pipe ++) {
++			vgt_reg_t pipeconf = __vreg(vgt, VGT_PIPECONF(pipe));
++			if (pipeconf & _REGBIT_PIPE_ENABLE) {
++				if (is_current_display_owner(vgt)) {
++					hw_enabled_pipes |= (1 << pipe);
++				} else {
++					hvm_enabled_pipes |= (1 << pipe);
++				}
++			}
++		}
++	}
++
++	hrtimer_cancel(&hstate->dpy_timer.timer);
++	if (hvm_enabled_pipes & ~hw_enabled_pipes) {
++		/*there is hvm enabled pipe which is not enabled on hardware */
++		hrtimer_start(&hstate->dpy_timer.timer,
++			ktime_add_ns(ktime_get(), hstate->dpy_timer.period),
++			HRTIMER_MODE_ABS);
++	}
 +}
 +
 +void vgt_irq_exit(struct pgt_device *pdev)
 +{
 +	free_irq(pdev->irq_hstate->pirq, pdev);
++	hrtimer_cancel(&pdev->irq_hstate->dpy_timer.timer);
 +
 +	/* TODO: recover i915 handler? */
 +	//unbind_from_irq(vgt_i915_irq(pdev));
@@ -24201,10 +24888,10 @@ index 0000000..43491a1
 +
 diff --git a/drivers/xen/vgt/mmio.c b/drivers/xen/vgt/mmio.c
 new file mode 100644
-index 0000000..d0ffc8b
+index 0000000..dd1bce8
 --- /dev/null
 +++ b/drivers/xen/vgt/mmio.c
-@@ -0,0 +1,1091 @@
+@@ -0,0 +1,1119 @@
 +/*
 + * MMIO virtualization framework
 + *
@@ -24344,7 +25031,17 @@ index 0000000..d0ffc8b
 +			return false;
 +		}
 +		mht->base = i;
-+		mht->align_bytes = 4;
++
++		/*
++		 * Win7 GFX driver uses memcpy to access the vgt PVINFO regs,
++		 * hence align_bytes can be 1.
++		 */
++		if (start >= VGT_PVINFO_PAGE &&
++			start < VGT_PVINFO_PAGE + VGT_PVINFO_SIZE)
++			mht->align_bytes = 1;
++		else
++			mht->align_bytes = 4;
++
 +		mht->read = read;
 +		mht->write = write;
 +		INIT_HLIST_NODE(&mht->hlist);
@@ -24502,6 +25199,11 @@ index 0000000..d0ffc8b
 +	unsigned int offset;
 +	unsigned long flags;
 +	bool rc;
++	cycles_t t0, t1;
++	struct vgt_statistics *stat = &vgt->stat;
++
++	t0 = get_cycles();
++	stat->mmio_rcnt++;
 +
 +	offset = vgt_pa_to_mmio_offset(vgt, pa);
 +
@@ -24546,6 +25248,7 @@ index 0000000..d0ffc8b
 +			printk("Disable untracked MMIO warning for VM(%d)\n", vgt->vm_id);
 +			printk("------------------------------------------\n");
 +			vgt->warn_untrack = 0;
++			show_debug(pdev);
 +		}
 +
 +		//WARN_ON(vgt->vm_id == 0); /* The call stack is meaningless for HVM */
@@ -24555,12 +25258,16 @@ index 0000000..d0ffc8b
 +
 +	spin_unlock_irqrestore(&pdev->lock, flags);
 +	trace_vgt_mmio_rw(VGT_TRACE_READ, vgt->vm_id, offset, p_data, bytes);
++
++	t1 = get_cycles();
++	stat->mmio_rcycles += t1 - t0;
 +	return true;
 +err_mmio:
 +	spin_unlock_irqrestore(&pdev->lock, flags);
 +err_common_chk:
 +	vgt_err("VM(%d): invalid MMIO offset(%08x), bytes(%d)!\n",
 +		vgt->vm_id, offset, bytes);
++	show_debug(pdev);
 +	return false;
 +}
 +
@@ -24577,6 +25284,11 @@ index 0000000..d0ffc8b
 +	unsigned long flags;
 +	vgt_reg_t old_vreg=0, old_sreg=0;
 +	bool rc;
++	cycles_t t0, t1;
++	struct vgt_statistics *stat = &vgt->stat;
++
++	t0 = get_cycles();
++	stat->mmio_wcnt++;
 +
 +	/* PPGTT PTE WP comes here too. */
 +	if (pdev->enable_ppgtt && vgt->vm_id != 0 && vgt->ppgtt_initialized) {
@@ -24666,19 +25378,18 @@ index 0000000..d0ffc8b
 +	reg_set_accessed(pdev, offset);
 +	spin_unlock_irqrestore(&pdev->lock, flags);
 +	trace_vgt_mmio_rw(VGT_TRACE_WRITE, vgt->vm_id, offset, p_data, bytes);
++
++	t1 = get_cycles();
++	stat->mmio_wcycles += t1 - t0;
 +	return true;
 +err_mmio:
 +	spin_unlock_irqrestore(&pdev->lock, flags);
 +err_common_chk:
 +	vgt_err("VM(%d): invalid MMIO offset(%08x),"
 +		"bytes(%d)!\n", vgt->vm_id, offset, bytes);
++	show_debug(pdev);
 +	return false;
 +}
-+
-+u64 mmio_rcnt=0;
-+u64 mmio_wcnt=0;
-+u64 mmio_rcycles=0;
-+u64 mmio_wcycles=0;
 +
 +static int vgt_hvm_do_ioreq(struct vgt_device *vgt, struct ioreq *ioreq);
 +static void vgt_crash_domain(struct vgt_device *vgt)
@@ -24697,6 +25408,7 @@ index 0000000..d0ffc8b
 +
 +	struct ioreq *ioreq;
 +	int irq, ret;
++	int cpu;
 +
 +	vgt_info("start kthread for VM%d\n", vgt->vm_id);
 +
@@ -24714,9 +25426,9 @@ index 0000000..d0ffc8b
 +		if (kthread_should_stop())
 +			return 0;
 +
++		cpu = vgt_enter();
 +		for (vcpu = 0; vcpu < nr_vcpus; vcpu++) {
-+			if (!test_and_clear_bit(vcpu,
-+				&info->ioreq_pending[vcpu / sizeof(long)]))
++			if (!test_and_clear_bit(vcpu, info->ioreq_pending))
 +				continue;
 +
 +			ioreq = vgt_get_hvm_ioreq(vgt, vcpu);
@@ -24730,6 +25442,7 @@ index 0000000..d0ffc8b
 +			irq = info->evtchn_irq[vcpu];
 +			notify_remote_via_irq(irq);
 +		}
++		vgt_exit(cpu);
 +	}
 +
 +	BUG(); /* It's actually impossible to reach here */
@@ -24744,7 +25457,6 @@ index 0000000..d0ffc8b
 +	char *cfg_space = &vgt->state.cfg_space[0];
 +	uint64_t base = * (uint64_t *) (cfg_space + VGT_REG_CFG_SPACE_BAR0);
 +	uint64_t tmp;
-+	cycles_t t0, t1;
 +
 +	if (vgt->vmem_vma == NULL && vgt_hvm_vmem_init(vgt) < 0) {
 +		vgt_err("can not map the memory of VM%d!!!\n", vgt->vm_id);
@@ -24755,8 +25467,6 @@ index 0000000..d0ffc8b
 +	sign = req->df ? -1 : 1;
 +
 +	if (req->dir == IOREQ_READ) {
-+		t0 = get_cycles();
-+		mmio_rcnt++;
 +		/* MMIO READ */
 +		if (!req->data_is_ptr) {
 +			if (req->count != 1)
@@ -24789,13 +25499,8 @@ index 0000000..d0ffc8b
 +					vgt_dbg("vGT: can not write gpa = 0x%lx!!!\n", gpa);
 +			}
 +		}
-+		t1 = get_cycles();
-+		t1 -= t0;
-+		mmio_rcycles += (u64) t1;
 +	}
 +	else { /* MMIO Write */
-+		t0 = get_cycles();
-+		mmio_wcnt++;
 +		if (!req->data_is_ptr) {
 +			if (req->count != 1)
 +				goto err_ioreq_count;
@@ -24824,9 +25529,6 @@ index 0000000..d0ffc8b
 +					return -EINVAL;
 +			}
 +		}
-+		t1 = get_cycles();
-+		t1 -= t0;
-+		mmio_wcycles += (u64) t1;
 +	}
 +	return 0;
 +
@@ -24945,7 +25647,7 @@ index 0000000..d0ffc8b
 +	int vcpu)
 +{
 +	struct vgt_hvm_info *info = vgt->hvm_info;
-+	set_bit(vcpu, &info->ioreq_pending[vcpu / sizeof(long)]);
++	set_bit(vcpu, info->ioreq_pending);
 +	if (waitqueue_active(&info->io_event_wq))
 +		wake_up(&info->io_event_wq);
 +}
@@ -25080,7 +25782,8 @@ index 0000000..d0ffc8b
 +		info->evtchn_irq[vcpu] = irq;
 +	}
 +
-+	thread = kthread_run(vgt_emulation_thread, vgt, "vgt_emulation");
++	thread = kthread_run(vgt_emulation_thread, vgt,
++			"vgt_emulation:%d", vgt->vm_id);
 +	if(IS_ERR(thread))
 +		goto err;
 +	info->emulation_thread = thread;
@@ -25257,8 +25960,20 @@ index 0000000..d0ffc8b
 +
 +void state_vreg_init(struct vgt_device *vgt)
 +{
-+	memcpy (vgt->state.vReg, vgt->pdev->initial_mmio_state,
-+		vgt->pdev->mmio_size);
++	int i;
++	struct pgt_device *pdev = vgt->pdev;
++
++	for (i = 0; i < pdev->mmio_size; i += sizeof(vgt_reg_t)) {
++		/*
++		 * skip the area of VGT PV INFO PAGE because we need keep
++		 * its content across Dom0 S3.
++		*/
++		if (i >= VGT_PVINFO_PAGE &&
++			i < VGT_PVINFO_PAGE + VGT_PVINFO_SIZE)
++			continue;
++
++		__vreg(vgt, i) = pdev->initial_mmio_state[i/sizeof(vgt_reg_t)];
++	}
 +
 +	/* set the bit 0:2 (Thread C-State) to C0
 +	 * TODO: consider other bit 3:31
@@ -25298,10 +26013,10 @@ index 0000000..d0ffc8b
 +}
 diff --git a/drivers/xen/vgt/reg.h b/drivers/xen/vgt/reg.h
 new file mode 100644
-index 0000000..159bac2
+index 0000000..df61ecf
 --- /dev/null
 +++ b/drivers/xen/vgt/reg.h
-@@ -0,0 +1,1645 @@
+@@ -0,0 +1,1685 @@
 +/*
 + * vGT core headers
 + *
@@ -25338,6 +26053,7 @@ index 0000000..159bac2
 +
 +#define _VGT_PIPE(pipe, a, b)		_VGT_MMIO_THROUGH_OFFSET(pipe, a, b)
 +#define _VGT_PORT(port, a, b)		_VGT_MMIO_THROUGH_OFFSET(port, a, b)
++#define _VGT_TRANSCODER(tran, a, b)   _VGT_MMIO_THROUGH_OFFSET(tran, a, b)
 +
 +#define _VGT_GET_PIPE(reg, a, b)	_VGT_MMIO_GET_INDEX(reg, a, b)
 +#define _VGT_GET_PORT(reg, a, b)	_VGT_MMIO_GET_INDEX(reg, a, b)
@@ -25473,6 +26189,7 @@ index 0000000..159bac2
 +#define _REG_VCS_UHPTR		0x12134
 +#define _REG_BCS_UHPTR		0x22134
 +#define _REG_VECS_UHPTR		0x1A134
++#define 	_REGBIT_UHPTR_VALID	(1 << 0)
 +#define VGT_UHPTR(ring_id) __RING_REG(ring_id, _REG_RCS_UHPTR, _REG_VCS_UHPTR, _REG_VECS_UHPTR)
 +
 +#define _REG_RCS_ACTHD		0x2074
@@ -26434,6 +27151,9 @@ index 0000000..159bac2
 +#define _REG_PIPECSTAT		0x72024
 +#define _REG_PIPEC_FRMCOUNT 	0x72040
 +
++/* eDP */
++#define _REG_PIPE_EDP_CONF	0x7f008
++
 +/* bit fields of pipeconf */
 +#define _REGBIT_PIPE_ENABLE		(1 << 31)
 +#define _REGBIT_PIPE_STAT_ENABLED	(1 << 30)
@@ -26448,6 +27168,7 @@ index 0000000..159bac2
 +#define VGT_PIPESTAT(pipe)	_VGT_PIPE(pipe, _REG_PIPEASTAT, _REG_PIPEBSTAT)
 +#define VGT_PIPE_FRMCOUNT(pipe)	_VGT_PIPE(pipe, _REG_PIPEA_FRMCOUNT, _REG_PIPEB_FRMCOUNT)
 +
++#define VGT_FRMCOUNTPIPE(frmcount) _VGT_GET_PIPE(frmcount, _REG_PIPEA_FRMCOUNT, _REG_PIPEB_FRMCOUNT)
 +
 +/* For Gen 2 */
 +#define _REG_CURSIZE		0x700a0
@@ -26704,7 +27425,8 @@ index 0000000..159bac2
 +enum vgt_plane_type {
 +	PRIMARY_PLANE = 0,
 +	CURSOR_PLANE,
-+	SPRITE_PLANE
++	SPRITE_PLANE,
++	MAX_PLANE
 +};
 +
 +enum vgt_port_type {
@@ -26751,8 +27473,7 @@ index 0000000..159bac2
 +#define    _REG_SDEISR	0xC4000
 +#define    _REG_SDEIMR	0xC4004
 +#define    _REG_SDEIIR	0xC4008
-+#define    _REGBIT_CRT_HOTPLUG			(1 << 19)
-+#define        _REGBIT_SDVO_B_HOTPLUG		(1 << 18)
++#define        _REGBIT_CRT_HOTPLUG		(1 << 19)
 +#define        _REGBIT_DP_B_HOTPLUG		(1 << 21)
 +#define        _REGBIT_DP_C_HOTPLUG		(1 << 22)
 +#define        _REGBIT_DP_D_HOTPLUG		(1 << 23)
@@ -26824,6 +27545,7 @@ index 0000000..159bac2
 +#define VGT_PCI_CLASS_VGA			0x03
 +#define VGT_PCI_CLASS_VGA_OTHER			0x80
 +
++#define VGT_REG_CFG_VENDOR_ID			0x00
 +#define VGT_REG_CFG_COMMAND			0x04
 +#define _REGBIT_CFG_COMMAND_IO			(1 << 0)
 +#define _REGBIT_CFG_COMMAND_MEMORY		(1 << 1)
@@ -26915,6 +27637,39 @@ index 0000000..159bac2
 +#define _REG_TRANS_DDI_FUNC_CTL_C	0x62400
 +#define _REG_TRANS_DDI_FUNC_CTL_EDP	0x6F400
 +
++#define _VGT_TRANS_DDI_FUNC_CTL(tran)   _VGT_TRANSCODER(tran, _REG_TRANS_DDI_FUNC_CTL_A, \
++						   _REG_TRANS_DDI_FUNC_CTL_B)
++
++
++#define  _REGBIT_TRANS_DDI_FUNC_ENABLE		(1<<31)
++/* Those bits are ignored by pipe EDP since it can only connect to DDI A */
++#define  _REGBIT_TRANS_DDI_PORT_MASK		(7<<28)
++#define  _REGBIT_TRANS_DDI_SELECT_PORT(x)	((x)<<28)
++#define  _REGBIT_TRANS_DDI_PORT_NONE		(0<<28)
++#define  _REGBIT_TRANS_DDI_MODE_SELECT_MASK	(7<<24)
++#define  _REGBIT_TRANS_DDI_MODE_SELECT_HDMI	(0<<24)
++#define  _REGBIT_TRANS_DDI_MODE_SELECT_DVI	(1<<24)
++#define  _REGBIT_TRANS_DDI_MODE_SELECT_DP_SST	(2<<24)
++#define  _REGBIT_TRANS_DDI_MODE_SELECT_DP_MST	(3<<24)
++#define  _REGBIT_TRANS_DDI_MODE_SELECT_FDI	(4<<24)
++#define  _REGBIT_TRANS_DDI_BPC_MASK		(7<<20)
++#define  _REGBIT_TRANS_DDI_BPC_8		(0<<20)
++#define  _REGBIT_TRANS_DDI_BPC_10		(1<<20)
++#define  _REGBIT_TRANS_DDI_BPC_6		(2<<20)
++#define  _REGBIT_TRANS_DDI_BPC_12		(3<<20)
++#define  _REGBIT_TRANS_DDI_PVSYNC		(1<<17)
++#define  _REGBIT_TRANS_DDI_PHSYNC		(1<<16)
++#define  _REGBIT_TRANS_DDI_EDP_INPUT_MASK	(7<<12)
++#define  _REGBIT_TRANS_DDI_EDP_INPUT_A_ON	(0<<12)
++#define  _REGBIT_TRANS_DDI_EDP_INPUT_A_ONOFF	(4<<12)
++#define  _REGBIT_TRANS_DDI_EDP_INPUT_B_ONOFF	(5<<12)
++#define  _REGBIT_TRANS_DDI_EDP_INPUT_C_ONOFF	(6<<12)
++#define  _REGBIT_TRANS_DDI_BFI_ENABLE		(1<<4)
++#define  _REGBIT_TRANS_DDI_PORT_WIDTH_X1	(0<<1)
++#define  _REGBIT_TRANS_DDI_PORT_WIDTH_X2	(1<<1)
++#define  _REGBIT_TRANS_DDI_PORT_WIDTH_X4	(3<<1)
++
++
 +#define _REG_TRANS_MSA_MISC_A	0x60410
 +#define _REG_TRANS_MSA_MISC_B	0x61410
 +#define _REG_TRANS_MSA_MISC_C	0x62410
@@ -26949,10 +27704,10 @@ index 0000000..159bac2
 +#endif	/* _VGT_REG_H_ */
 diff --git a/drivers/xen/vgt/render.c b/drivers/xen/vgt/render.c
 new file mode 100644
-index 0000000..5ed076c
+index 0000000..97dd8ff
 --- /dev/null
 +++ b/drivers/xen/vgt/render.c
-@@ -0,0 +1,1788 @@
+@@ -0,0 +1,1866 @@
 +/*
 + * Render context management
 + *
@@ -27091,13 +27846,54 @@ index 0000000..5ed076c
 +static bool idle_render_engine(struct pgt_device *pdev, int id)
 +{
 +	if (wait_for_atomic(ring_is_empty(pdev, id), VGT_RING_TIMEOUT) != 0) {
-+		vgt_err("Timeout wait %d ms for ring(%d) empty\n",
++		int i, busy = 1;
++		vgt_reg_t acthd1, acthd2;
++		vgt_warn("Timeout wait %d ms for ring(%d) empty\n",
 +			VGT_RING_TIMEOUT, id);
-+		return false;
++
++		/*
++		 * TODO:
++		 * The timeout value may be not big enough, for some specific
++		 * workloads in the VM, if they submit a big trunk of commands
++		 * in a batch. The problem in current implementation is, ctx
++		 * switch request is made asynchronous to the cmd submission.
++		 * it's possible to have a request handled right after the
++		 * current owner submits a big trunk of commands, and thus 
++		 * need to wait for a long time for completion. 
++		 *
++		 * a better way is to detect ring idle in a delayed fashion,
++		 * e.g. in interrupt handler. That should remove this tricky
++		 * multi-iteration logic simpler
++		 */
++		acthd1 = VGT_MMIO_READ(pdev, VGT_ACTHD(id));
++		busy = wait_for_atomic(ring_is_empty(pdev, id), 50);
++		for (i = 0; i < 3; i++) {
++			if (!busy)
++				break;
++
++			vgt_info("(%d) check whether ring actually stops\n", i);
++			acthd2 = VGT_MMIO_READ(pdev, VGT_ACTHD(id));
++			if (acthd1 == acthd2)
++				break;
++
++			vgt_info("ring still moves (%x->%x)\n",
++				acthd1, acthd2);
++			acthd1 = acthd2;
++
++			vgt_info("trigger another wait...\n");
++			busy = wait_for_atomic(ring_is_empty(pdev, id),
++				VGT_RING_TIMEOUT);
++		}
++
++		if (busy) {
++			vgt_err("Ugh...it's a real hang!!!\n");
++			return false;
++		} else {
++			vgt_warn("ring idle now... after extra wait\n");
++		}
 +	}
 +
 +	/* may do some jobs here to make sure ring idle */
-+
 +	if (wait_for_atomic(ring_is_xxx(pdev, id), VGT_RING_TIMEOUT) != 0) {
 +		vgt_err("Timeout wait %d ms for ring(%d) xxx\n",
 +			VGT_RING_TIMEOUT, id);
@@ -28390,12 +29186,15 @@ index 0000000..5ed076c
 +	 */
 +	spin_lock_irq(&pdev->lock);
 +
-+	ASSERT(pdev->next_sched_vgt);
++	vgt_schedule(pdev);
++
++	if (!ctx_switch_requested(pdev))
++		goto out;
++
 +	next = pdev->next_sched_vgt;
 +	prev = current_render_owner(pdev);
-+
-+	if (next == prev)
-+		goto out;
++	ASSERT(pdev->next_sched_vgt);
++	ASSERT(next != prev);
 +
 +	if (!idle_rendering_engines(pdev, &i)) {
 +		int j;
@@ -28537,7 +29336,7 @@ index 0000000..5ed076c
 +			vgt_dom0->rb[i].sring.head,
 +			vgt_dom0->rb[i].sring.tail,
 +			vgt_dom0->rb[i].sring.start);
-+	show_debug(pdev, i);
++	show_ring_debug(pdev, i);
 +	show_ringbuffer(pdev, i, 16 * sizeof(vgt_reg_t));
 +	spin_unlock_irq(&pdev->lock);
 +	/* crash system now, to avoid causing more confusing errors */
@@ -28558,18 +29357,14 @@ index 0000000..5ed076c
 +	return 0;
 +}
 +
-+u64 ring_mmio_rcnt=0;
-+u64 ring_mmio_wcnt=0;
-+u64 ring_tail_mmio_wcnt=0;
-+u64 ring_tail_mmio_wcycles=0;
-+
 +bool ring_mmio_read(struct vgt_device *vgt, unsigned int off,
 +	void *p_data, unsigned int bytes)
 +{
 +	int ring_id, rel_off;
 +	vgt_ringbuffer_t	*vring;
++	struct vgt_statistics *stat = &vgt->stat;
 +
-+	ring_mmio_rcnt++;
++	stat->ring_mmio_rcnt++;
 +
 +	if ((hvm_render_owner && (vgt->vm_id != 0)) || reg_hw_access(vgt, off)){
 +		unsigned long data;
@@ -28598,8 +29393,11 @@ index 0000000..5ed076c
 +	vgt_reg_t	oval;
 +	cycles_t	t0, t1;
 +	struct pgt_device *pdev = vgt->pdev;
++	struct vgt_statistics *stat = &vgt->stat;
 +
-+	ring_mmio_wcnt++;
++	t0 = get_cycles();
++	stat->ring_mmio_wcnt++;
++
 +	vgt_dbg("vGT:ring_mmio_write (0x%x) with val (0x%x)\n", off, *((u32 *)p_data));
 +	rel_off = off & ( sizeof(vgt_ringbuffer_t) - 1 );
 +
@@ -28619,8 +29417,7 @@ index 0000000..5ed076c
 +
 +	switch (rel_off) {
 +	case RB_OFFSET_TAIL:
-+		t0 = get_cycles();
-+		ring_tail_mmio_wcnt++;
++		stat->ring_tail_mmio_wcnt++;
 +
 +		/* enable hvm tailq after the ring enabled */
 +		if (shadow_tail_based_qos) {
@@ -28643,8 +29440,9 @@ index 0000000..5ed076c
 +
 +		if ( !bypass_scan )
 +			vgt_scan_vring(vgt, ring_id);
++
 +		t1 = get_cycles();
-+		ring_tail_mmio_wcycles += (t1-t0);
++		stat->ring_tail_mmio_wcycles += (t1-t0);
 +
 +		if (shadow_tail_based_qos) {
 +			if (vgt_tailq_last_stail(tailq)
@@ -28740,13 +29538,48 @@ index 0000000..5ed076c
 +}
 +EXPORT_SYMBOL_GPL(vgt_gpu_perf_sample);
 +
++bool ring_uhptr_write(struct vgt_device *vgt, unsigned int off,
++	void *p_data, unsigned int bytes)
++{
++	int ring_id;
++	vgt_state_ring_t	*rs;
++	vgt_reg_t val = *(vgt_reg_t *)p_data;
 +
++	switch (off) {
++	case _REG_RCS_UHPTR:
++		ring_id = RING_BUFFER_RCS;
++		break;
++	case _REG_VCS_UHPTR:
++		ring_id = RING_BUFFER_VCS;
++		break;
++	case _REG_BCS_UHPTR:
++		ring_id = RING_BUFFER_BCS;
++		break;
++	case _REG_VECS_UHPTR:
++		ring_id = RING_BUFFER_VECS;
++		break;
++	default:
++		ASSERT(0);
++		break;
++	}
++
++	rs = &vgt->rb[ring_id];
++
++	/* only cache the latest value */
++	if (rs->uhptr & _REGBIT_UHPTR_VALID)
++		vgt_info("VM(%d)-r%d: overwrite a valid uhptr (o:%x, n:%x)\n",
++			vgt->vm_id, ring_id, rs->uhptr, val);
++
++	rs->uhptr = val;
++	rs->uhptr_id = rs->request_id;
++	return true;
++}
 diff --git a/drivers/xen/vgt/sched.c b/drivers/xen/vgt/sched.c
 new file mode 100644
-index 0000000..280416a
+index 0000000..b66a6d0
 --- /dev/null
 +++ b/drivers/xen/vgt/sched.c
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,863 @@
 +/*
 + * Render schedulers
 + *
@@ -28827,6 +29660,14 @@ index 0000000..280416a
 +{
 +	struct list_head *next = &vgt->list;
 +	struct vgt_device *next_vgt = NULL;
++	struct pgt_device *pdev;
++
++	if (vgt->force_removal)
++		return vgt_dom0;
++
++	pdev = vgt->pdev;
++	if (ctx_switch_requested(pdev))
++		return pdev->next_sched_vgt;
 +
 +	do {
 +		next = next->next;
@@ -28835,9 +29676,7 @@ index 0000000..280416a
 +			next = head->next;
 +		next_vgt = list_entry(next, struct vgt_device, list);
 +
-+		if (vgt->force_removal ||
-+			//!bitmap_empty(next_vgt->started_rings, MAX_ENGINES))
-+			!vgt_vrings_empty(next_vgt))
++		if (!vgt_vrings_empty(next_vgt))
 +			break;
 +
 +	} while (next_vgt != vgt);
@@ -28845,35 +29684,17 @@ index 0000000..280416a
 +	return next_vgt;
 +}
 +
-+
++/* safe to not use vgt_enter/vgt_exit, otherwise easily lead to deadlock */
 +static enum hrtimer_restart vgt_tbs_timer_fn(struct hrtimer *data)
 +{
 +	struct vgt_hrtimer *hrtimer = container_of(data,
 +			struct vgt_hrtimer, timer);
 +	struct pgt_device *pdev = vgt_hrtimer_pdev;
-+	unsigned long flags;
 +
 +	ASSERT(pdev);
 +
-+	spin_lock_irqsave(&pdev->lock, flags);
-+	/* TODO: if no more than 2 vgt in runqueue */
-+	if (vgt_nr_in_runq(pdev) < 2)
-+		goto reload_timer;
-+
-+	pdev->next_sched_vgt = tbs_next_vgt(&pdev->rendering_runq_head,
-+			current_render_owner(pdev));
-+
-+	if (vgt_chk_raised_request(pdev, VGT_REQUEST_CTX_SWITCH))
-+		vgt_dbg("Warning: last request for ctx_switch not handled yet!\n");
-+
-+	if (pdev->next_sched_vgt != current_render_owner(pdev)) {
++	if (vgt_nr_in_runq(pdev) > 1)
 +		vgt_raise_request(pdev, VGT_REQUEST_CTX_SWITCH);
-+		spin_unlock_irqrestore(&pdev->lock, flags);
-+		return HRTIMER_NORESTART;
-+	}
-+
-+reload_timer:
-+	spin_unlock_irqrestore(&pdev->lock, flags);
 +	hrtimer_add_expires_ns(&hrtimer->timer, hrtimer->period);
 +	return HRTIMER_RESTART;
 +}
@@ -29215,8 +30036,11 @@ index 0000000..280416a
 +	struct vgt_hrtimer *hrtimer = container_of(data,
 +			struct vgt_hrtimer, timer);
 +	struct pgt_device *pdev = vgt_hrtimer_pdev;
++	int cpu;
++
 +	ASSERT(pdev);
 +
++	cpu = vgt_enter();
 +	spin_lock_irqsave(&pdev->lock, flags);
 +	/* TODO: if no more than 2 vgt in runqueue */
 +	active_nr = vgt_nr_in_runq(pdev);
@@ -29253,6 +30077,8 @@ index 0000000..280416a
 +		hrtimer->period = VGT_TAILQ_RB_POLLING_PERIOD;
 +
 +	hrtimer_add_expires_ns(&hrtimer->timer, hrtimer->period);
++
++	vgt_exit(cpu);
 +	return HRTIMER_RESTART;
 +}
 +
@@ -29540,6 +30366,18 @@ index 0000000..280416a
 +	}
 +}
 +
++void vgt_schedule(struct pgt_device *pdev)
++{
++	ASSERT(spin_is_locked(&pdev->lock));
++
++	if (vgt_nr_in_runq(pdev) < 2)
++		return;
++
++	pdev->next_sched_vgt = tbs_next_vgt(&pdev->rendering_runq_head,
++			current_render_owner(pdev));
++}
++
++
 +static int calculate_budget(struct vgt_device *vgt)
 +{
 +#if 0
@@ -29607,10 +30445,10 @@ index 0000000..280416a
 +}
 diff --git a/drivers/xen/vgt/sysfs.c b/drivers/xen/vgt/sysfs.c
 new file mode 100644
-index 0000000..7923ec8
+index 0000000..b7202e3
 --- /dev/null
 +++ b/drivers/xen/vgt/sysfs.c
-@@ -0,0 +1,617 @@
+@@ -0,0 +1,644 @@
 +/*
 + * vGT sysfs interface (the original code comes from samples/kobject-example.c)
 + *
@@ -29657,6 +30495,7 @@ index 0000000..7923ec8
 +	int rc;
 +	int high_gm_sz;
 +	int low_gm_sz;
++	int cpu;
 +
 +	/* We expect the param_str should be vmid,a,b,c (where the guest
 +	* wants a MB aperture and b MB gm, and c fence registers) or -vmid
@@ -29686,9 +30525,11 @@ index 0000000..7923ec8
 +	} else
 +		return -EINVAL;
 +
++	cpu = vgt_enter();
 +	mutex_lock(&vgt_sysfs_lock);
 +	rc = (vp.vm_id > 0) ? vgt_add_state_sysfs(vp) : vgt_del_state_sysfs(vp);
 +	mutex_unlock(&vgt_sysfs_lock);
++	vgt_exit(cpu);
 +
 +	return rc < 0 ? rc : count;
 +}
@@ -29728,10 +30569,12 @@ index 0000000..7923ec8
 +	int vmid;
 +	struct vgt_device *next_vgt;
 +	struct pgt_device *pdev;
++	int cpu;
 +
 +	if (sscanf(buf, "%d", &vmid) != 1)
 +		return -EINVAL;
 +
++	cpu = vgt_enter();
 +	mutex_lock(&vgt_sysfs_lock);
 +
 +	spin_lock_irqsave(&default_device.lock, flags);
@@ -29748,12 +30591,19 @@ index 0000000..7923ec8
 +		goto out;
 +	}
 +
++	if (!__vreg(next_vgt, vgt_info_off(display_ready))) {
++		printk("VGT %d: Display is not ready.\n", vmid);
++		ret = -EAGAIN;
++		goto out;
++	}
++
 +	do_vgt_fast_display_switch(next_vgt);
 +out:
 +	spin_unlock_irqrestore(&default_device.lock, flags);
 +
 +	mutex_unlock(&vgt_sysfs_lock);
 +
++	vgt_exit(cpu);
 +	return ret;
 +}
 +
@@ -29848,6 +30698,9 @@ index 0000000..7923ec8
 +{
 +	struct pgt_device *pdev = &default_device;
 +	ssize_t buf_len;
++	int cpu;
++
++	cpu = vgt_enter();
 +
 +	mutex_lock(&vgt_sysfs_lock);
 +	spin_lock_irq(&pdev->lock);
@@ -29856,6 +30709,7 @@ index 0000000..7923ec8
 +	spin_unlock_irq(&pdev->lock);
 +	mutex_unlock(&vgt_sysfs_lock);
 +
++	vgt_exit(cpu);
 +	return buf_len;
 +}
 +
@@ -29887,9 +30741,13 @@ index 0000000..7923ec8
 +				const char *buf, size_t count)
 +{
 +	unsigned hotplug_cmd = 0;
++	int cpu;
++
 +	if (sscanf(buf, "%i", &hotplug_cmd) != 1)
 +		return -EINVAL;
++	cpu = vgt_enter();
 +	vgt_trigger_display_hot_plug(&default_device, (vgt_hotplug_cmd_t)hotplug_cmd);
++	vgt_exit(cpu);
 +	return count;
 +}
 +
@@ -30055,10 +30913,12 @@ index 0000000..7923ec8
 +	struct pgt_device *pdev = &default_device;
 +	size_t init_count = count, len;
 +	unsigned long data;
++	int cpu;
 +
 +	if (!count || off < 0 || off + count > bin_attr->size || (off & 0x3))
 +		return -EINVAL;
 +
++	cpu = vgt_enter();
 +	spin_lock_irq(&pdev->lock);
 +
 +	while (count > 0) {
@@ -30068,6 +30928,7 @@ index 0000000..7923ec8
 +		if (hcall_mmio_read(_vgt_mmio_pa(pdev, off), len, &data) !=
 +				X86EMUL_OKAY) {
 +			spin_unlock_irq(&pdev->lock);
++			vgt_exit(cpu);
 +			return -EIO;
 +		}
 +
@@ -30077,6 +30938,7 @@ index 0000000..7923ec8
 +	}
 +
 +	spin_unlock_irq(&pdev->lock);
++	vgt_exit(cpu);
 +
 +	return init_count;
 +}
@@ -30089,10 +30951,12 @@ index 0000000..7923ec8
 +	struct pgt_device *pdev = &default_device;
 +	size_t init_count = count, len;
 +	unsigned long data;
++	int cpu;
 +
 +	if (!count || off < 0 || off + count > bin_attr->size || (off & 0x3))
 +		return -EINVAL;
 +
++	cpu = vgt_enter();
 +	spin_lock_irq(&pdev->lock);
 +
 +	while (count > 0) {
@@ -30103,6 +30967,7 @@ index 0000000..7923ec8
 +		if (hcall_mmio_write(_vgt_mmio_pa(pdev, off), len, data) !=
 +				X86EMUL_OKAY) {
 +			spin_unlock_irq(&pdev->lock);
++			vgt_exit(cpu);
 +			return -EIO;
 +		}
 +
@@ -30111,7 +30976,7 @@ index 0000000..7923ec8
 +	}
 +
 +	spin_unlock_irq(&pdev->lock);
-+
++	vgt_exit(cpu);
 +	return init_count;
 +}
 +
@@ -30359,10 +31224,10 @@ index 0000000..8573eb3
 +#include <trace/define_trace.h>
 diff --git a/drivers/xen/vgt/utility.c b/drivers/xen/vgt/utility.c
 new file mode 100644
-index 0000000..6ac528c
+index 0000000..98f95c8
 --- /dev/null
 +++ b/drivers/xen/vgt/utility.c
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,517 @@
 +/*
 + * Various utility helpers.
 + *
@@ -30396,18 +31261,54 @@ index 0000000..6ac528c
 +#include <drm/intel-gtt.h>
 +#include <asm/cacheflush.h>
 +
++void show_debug(struct pgt_device *pdev)
++{
++	int i, cpu;
++
++	printk("========vGT DEBUG INFO==========\n");
++	for_each_online_cpu(cpu)
++		printk("CPU[%d]: %s\n", cpu,
++			per_cpu(in_vgt, cpu) ? "in vgt" : "out of vgt");
++	printk("DE_RRMR: %x\n", VGT_MMIO_READ(pdev, _REG_DE_RRMR));
++
++	for (i = 0; i < pdev->max_engines; i++) {
++		printk("-----------ring-%d info-------------\n", i);
++		show_ring_debug(pdev, i);
++		show_ringbuffer(pdev, i, 16 * sizeof(vgt_reg_t));
++	}
++}
++
 +/*
 + * Print debug registers for CP
 + *
 + * Hope to introduce a sysfs interface to dump this information on demand
 + * in the future
 + */
-+void show_debug(struct pgt_device *pdev, int ring_id)
++void show_ring_debug(struct pgt_device *pdev, int ring_id)
 +{
 +	vgt_reg_t reg;
++	int i;
 +
-+	printk("debug registers(ring-%d),reg maked with <*>"
-+			" may not apply to every ring):\n", ring_id);
++	for (i = 0; i < VGT_MAX_VMS; i++) {
++		struct vgt_device *vgt;
++		if (pdev->device[i]) {
++			vgt = pdev->device[i];
++			if (vgt == current_render_owner(pdev))
++				printk("VM%d(*):", vgt->vm_id);
++			else
++				printk("VM%d   :", vgt->vm_id);
++
++			printk("head(%x), tail(%x), start(%x), ctl(%x), uhptr(%x)\n",
++				vgt->rb[ring_id].sring.head,
++				vgt->rb[ring_id].sring.tail,
++				vgt->rb[ring_id].sring.start,
++				vgt->rb[ring_id].sring.ctl,
++				__vreg(vgt, VGT_UHPTR(ring_id)));
++		}
++	}
++
++	printk("debug registers,reg maked with <*>"
++		" may not apply to every ring):\n");
 +	printk("....RING_EIR: %08x\n", VGT_MMIO_READ(pdev, RING_EIR(ring_id)));
 +	printk("....RING_EMR: %08x\n", VGT_MMIO_READ(pdev, RING_EMR(ring_id)));
 +	printk("....RING_ESR: %08x\n", VGT_MMIO_READ(pdev, RING_ESR(ring_id)));
@@ -30493,51 +31394,33 @@ index 0000000..6ac528c
 +	SHOW_MODE(_REG_TILECTL);
 +}
 +
-+void show_batchbuffer(struct pgt_device *pdev, u32 addr, bool in_ppgtt)
++static void show_batchbuffer(struct pgt_device *pdev, u32 addr,
++	int bytes, int ppgtt)
 +{
-+	int i, index1, index2, pte_val;
-+	char *p_contents, *ip_va;
-+	struct vgt_device *vgt;
-+	u32 offset;
++	int i;
++	char *ip_va;
++	struct vgt_device *vgt = current_render_owner(pdev);
 +
-+	if (in_ppgtt) {
-+		vgt = current_render_owner(pdev);
-+		ip_va = vgt_gma_to_va(vgt, addr, true);
-+		printk("Batch buffer contents: \n[%08x]: ", addr);
-+		for (i = 0; i < 8; i++, ip_va += 4) {
-+			if (i && (!((u64)ip_va & (GTT_PAGE_SIZE - 1))))
-+				ip_va = vgt_gma_to_va(vgt, (addr + i * 4),
-+						true);
-+			printk("%08x ", *((u32 *)ip_va));
-+		}
-+		printk("\n");
++	if (!vgt) {
++		vgt_err("no render owner at hanging point\n");
 +		return;
-+
 +	}
 +
-+	index1 = GTT_INDEX(pdev, pdev->batch_buffer_page);
-+	index2 = GTT_INDEX(pdev, addr);
-+	pte_val = vgt_read_gtt(pdev, index2);
-+	vgt_write_gtt(pdev, index1, pte_val);
++	printk("Batch buffer contents: \n");
++	for (i = -bytes; i < bytes; i += 4) {
++		ip_va = vgt_gma_to_va(vgt, addr+i, ppgtt);
 +
-+	/* offset within page */
-+	offset = (addr & (~GTT_PAGE_MASK));
-+	p_contents = phys_aperture_vbase(pdev) +
-+		pdev->batch_buffer_page;
-+	printk("Batch buffer remaps to %x (p_contents: %llx)\n",
-+			pte_val, (u64)p_contents);
-+	printk("[%08x]:", offset);
-+	for (i = 0; i < 8; i++, offset +=4) {
-+		if (offset >= GTT_PAGE_SIZE) {
-+			index2 = GTT_INDEX(pdev, addr + GTT_PAGE_SIZE);
-+			pte_val = vgt_read_gtt(pdev, index2);
-+			vgt_write_gtt(pdev, index1, pte_val);
-+			offset = 0;
-+		}
-+		printk(" %08x", *((u32 *)(p_contents + offset)));
++		if (!((i + bytes) % 32))
++			printk("\n[%08x]:", addr+i);
++
++		if (ip_va == NULL)
++			printk(" %8s", "N/A");
++		else
++			printk(" %08x", *((u32 *)ip_va));
++		if (!i)
++			printk("(*)");
 +	}
 +	printk("\n");
-+
 +}
 +
 +/*
@@ -30597,36 +31480,15 @@ index 0000000..6ac528c
 +
 +	off = WRAP_OFF(p_head - 8, ring_len);
 +	cur = (u32*)(p_contents + off);
-+	if ((*cur & 0xfffff000) == 0x18800000 && vgt) {
-+		u32 val, h_val;
-+		u64 mfn;
-+		int rc;
++	if ((*cur & 0xfff00000) == 0x18800000 && vgt) {
++		printk("Hang in (%s) batch buffer (%x)\n",
++			(*cur & _CMDBIT_BB_START_IN_PPGTT) ? "PPGTT" : "GTT",
++			*(cur + 1));
 +
-+		printk("Hang in batch buffer (%x)\n", *(cur + 1));
-+
-+		if (*cur & _CMDBIT_BB_START_IN_PPGTT) {
-+			printk("Dumping batch buffer in PPGTT"
-+					" is not supported yet!\n");
-+			show_batchbuffer(pdev, VGT_MMIO_READ(pdev,
-+						VGT_ACTHD(ring_id)), true);
-+			return;
-+		}
-+
-+		cur++;
-+		val = vgt->vgtt[GTT_INDEX(pdev, *cur)];
-+		printk("vGTT: %x\n", val);
-+		rc = gtt_p2m(vgt, val, &h_val);
-+		if (rc < 0) {
-+			printk("failed to translate\n");
-+		} else {
-+			mfn = gtt_pte_get_pfn(pdev, h_val);
-+			printk("MACH: %x %llx\n", h_val, mfn);
-+		}
-+		printk("Actual pGTT: %x\n",
-+				vgt_read_gtt(pdev, GTT_INDEX(pdev, *cur)));
-+		show_batchbuffer(pdev, VGT_MMIO_READ(pdev,
-+					VGT_ACTHD(ring_id)), false);
-+
++		show_batchbuffer(pdev,
++			VGT_MMIO_READ(pdev, VGT_ACTHD(ring_id)),
++			(*cur & _CMDBIT_BB_START_IN_PPGTT),
++			bytes);
 +	}
 +}
 +
@@ -30885,10 +31747,10 @@ index 0000000..6ac528c
 +}
 diff --git a/drivers/xen/vgt/vgt.c b/drivers/xen/vgt/vgt.c
 new file mode 100644
-index 0000000..72a143c
+index 0000000..d5f42d0
 --- /dev/null
 +++ b/drivers/xen/vgt/vgt.c
-@@ -0,0 +1,791 @@
+@@ -0,0 +1,816 @@
 +/*
 + * vGT module interface
 + *
@@ -31023,29 +31885,31 @@ index 0000000..72a143c
 +};
 +
 +struct vgt_device *vgt_dom0;
++DEFINE_PER_CPU(u8, in_vgt);
 +
 +static bool vgt_start_io_forwarding(struct pgt_device *pdev)
 +{
-+	struct vcpu_io_forwarding_request trap_req;
++	struct xen_domctl domctl;
++	struct xen_domctl_vgt_io_trap *info = &domctl.u.vgt_io_trap;
++
 +	uint64_t bar0; /* the MMIO BAR for regs(2MB) and GTT */
 +
 +	struct xen_platform_op xpop;
 +
-+
 +	bar0 = *(uint64_t *)&pdev->initial_cfg_space[VGT_REG_CFG_SPACE_BAR0];
 +	bar0 &= ~0xf;	/* bit0~3 of the bar is the attribution info */
 +
-+	trap_req.nr_pio_frags = 1;
-+	trap_req.pio_frags[0].s = 0x3B0;
-+	trap_req.pio_frags[0].e = 0x3DF;
-+	trap_req.nr_mmio_frags = 1;
-+	trap_req.mmio_frags[0].s = bar0;
-+	trap_req.mmio_frags[0].e = (bar0 + pdev->bar_size[0] - 1) & PAGE_MASK;
++	domctl.domain = 0;
 +
-+	if (HYPERVISOR_vcpu_op(VCPUOP_start_io_forward, 0, &trap_req) < 0) {
-+		vgt_err("vGT: failed to start I/O forwarding\n");
-+		return false;
-+	}
++	info->n_pio = 1;
++	info->pio[0].s = 0x3B0;
++	info->pio[0].e = 0x3DF;
++
++	info->n_mmio = 1;
++	info->mmio[0].s = bar0;
++	info->mmio[0].e = (bar0 + pdev->bar_size[0] - 1) & PAGE_MASK;
++
++	BUG_ON(vgt_io_trap(&domctl) != 0);
 +
 +	if (xen_register_vgt_driver(&vgt_xops) != 0)
 +		return false;
@@ -31104,6 +31968,7 @@ index 0000000..72a143c
 +{
 +	struct pgt_device *pdev = (struct pgt_device *)priv;
 +	int ret;
++	int cpu;
 +
 +	//ASSERT(current_render_owner(pdev));
 +	printk("vGT: start kthread for dev (%x, %x)\n", pdev->bus, pdev->devfn);
@@ -31121,9 +31986,14 @@ index 0000000..72a143c
 +			continue;
 +		}
 +
++		cpu = vgt_enter();
++
 +		if (freezing(current)) {
-+			if (current_render_owner(pdev) == vgt_dom0)
++			if (current_render_owner(pdev) == vgt_dom0) {
++				vgt_exit(cpu);
 +				try_to_freeze();
++				cpu = vgt_enter();
++			}
 +			else {
 +				spin_lock_irq(&pdev->lock);
 +				pdev->next_sched_vgt = vgt_dom0;
@@ -31152,9 +32022,19 @@ index 0000000..72a143c
 +				(void *)&pdev->request)) {
 +			if (!vgt_do_render_context_switch(pdev)) {
 +				vgt_err("Exiting thread!!!\n");
++				vgt_exit(cpu);
 +				break;
 +			}
 +		}
++
++		if (test_and_clear_bit(VGT_REQUEST_EMUL_DPY_EVENTS,
++				(void *)&pdev->request)) {
++			spin_lock_irq(&pdev->lock);
++			vgt_emulate_dpy_events(pdev);
++			spin_unlock_irq(&pdev->lock);
++		}
++
++		vgt_exit(cpu);
 +	}
 +	return 0;
 +}
@@ -31280,6 +32160,13 @@ index 0000000..72a143c
 +	if (!vgt_set_device_type(pdev))
 +		return false;
 +
++	if (!IS_HSW(pdev)) {
++		vgt_err("Unsupported gen_dev_type(%s)!\n",
++			IS_IVB(pdev) ?
++			"IVB" : "SNB(or unknown GEN types)");
++		return false;
++	}
++
 +	/* check PPGTT enabling. */
 +	if (IS_IVB(pdev) || IS_HSW(pdev))
 +		pdev->enable_ppgtt = 1;
@@ -31376,7 +32263,7 @@ index 0000000..72a143c
 +	spin_lock_init(&pdev->lock);
 +
 +	if (!vgt_initialize_pgt_device(dev, pdev))
-+		goto err;
++		return -EINVAL;
 +
 +	if (vgt_cmd_parser_init(pdev) < 0)
 +		goto err;
@@ -31438,7 +32325,7 @@ index 0000000..72a143c
 +	init_waitqueue_head(&pdev->event_wq);
 +	init_waitqueue_head(&pdev->destroy_wq);
 +
-+	p_thread = kthread_run(vgt_thread, pdev, "vgt_thread");
++	p_thread = kthread_run(vgt_thread, pdev, "vgt_main");
 +	if (!p_thread) {
 +		goto err;
 +	}
@@ -31682,10 +32569,10 @@ index 0000000..72a143c
 +
 diff --git a/drivers/xen/vgt/vgt.h b/drivers/xen/vgt/vgt.h
 new file mode 100644
-index 0000000..21dfc28
+index 0000000..6c2bf04
 --- /dev/null
 +++ b/drivers/xen/vgt/vgt.h
-@@ -0,0 +1,2127 @@
+@@ -0,0 +1,2195 @@
 +/*
 + * vGT core headers
 + *
@@ -31742,9 +32629,9 @@ index 0000000..21dfc28
 +extern struct list_head pgt_devices;
 +extern struct pgt_device default_device;
 +extern void show_ringbuffer(struct pgt_device *pdev, int ring_id, int bytes);
-+extern void show_batchbuffer(struct pgt_device *pdev, u32 addr, bool in_ppgtt);
 +extern void show_mode_settings(struct pgt_device *pdev);
-+extern void show_debug(struct pgt_device *pdev, int ring_id);
++extern void show_ring_debug(struct pgt_device *pdev, int ring_id);
++extern void show_debug(struct pgt_device *pdev);
 +
 +extern bool hvm_render_owner;
 +extern bool hvm_display_owner;
@@ -31866,6 +32753,14 @@ index 0000000..21dfc28
 +
 +	EVENT_RESERVED,
 +	EVENT_MAX,
++};
++
++
++enum transcoder {
++	TRANSCODER_A = 0,
++	TRANSCODER_B,
++	TRANSCODER_C,
++	TRANSCODER_EDP = 0xF,
 +};
 +
 +#define vgt_info(fmt, s...)	\
@@ -32013,6 +32908,9 @@ index 0000000..21dfc28
 +	uint64_t cmd_nr;
 +	vgt_reg_t	last_scan_head;
 +	uint64_t request_id;
++
++	vgt_reg_t uhptr;
++	uint64_t uhptr_id;
 +} vgt_state_ring_t;
 +
 +struct vgt_device;
@@ -32130,6 +33028,22 @@ index 0000000..21dfc28
 +	u64	last_propagation;
 +	u64	last_blocked_propagation;
 +	u64	last_injection;
++
++	/* mmio statistics */
++	u64	gtt_mmio_rcnt;
++	u64	gtt_mmio_wcnt;
++	u64	gtt_mmio_wcycles;
++	u64	gtt_mmio_rcycles;
++	u64	mmio_rcnt;
++	u64	mmio_wcnt;
++	u64	mmio_wcycles;
++	u64	mmio_rcycles;
++	u64	ring_mmio_rcnt;
++	u64	ring_mmio_wcnt;
++	u64	ring_tail_mmio_wcnt;
++	u64	ring_tail_mmio_wcycles;
++	u64	vring_scan_cnt;
++	u64	vring_scan_cycles;
 +};
 +
 +/* per-VM structure */
@@ -32210,6 +33124,7 @@ index 0000000..21dfc28
 +/* DPCD end */
 +
 +struct vgt_device {
++	enum vgt_pipe pipe_mapping[I915_MAX_PIPES];
 +	int vgt_id;		/* 0 is always for dom0 */
 +	int vm_id;		/* domain ID per hypervisor */
 +	struct pgt_device *pdev;	/* the pgt device where the GT device registered. */
@@ -32233,7 +33148,6 @@ index 0000000..21dfc28
 +	int			fence_base;
 +	int			fence_sz;
 +
-+	bool		bypass_addr_check;
 +
 +#define VMEM_1MB		(1ULL << 20)	/* the size of the first 1MB */
 +#define VMEM_BUCK_SHIFT		20
@@ -32246,6 +33160,9 @@ index 0000000..21dfc28
 +	struct vm_struct **vmem_vma;
 +	/* for >1MB memory of HVM: each vm_struct means 4KB */
 +	struct vm_struct **vmem_vma_4k;
++
++	/* the max gpfn of the <4G memory */
++	unsigned long low_mem_max_gpfn;
 +
 +	uint64_t vgtt_sz; /* virtual GTT size in byte */
 +	uint32_t *vgtt; /* virtual GTT table for guest to read */
@@ -32290,11 +33207,15 @@ index 0000000..21dfc28
 +	 */
 +	uint8_t hvm_boot_foreground_visible:1;
 +	uint8_t warn_untrack:1;
++	uint8_t bypass_addr_check:1;
++
 +	atomic_t crashing;
 +
 +	uint64_t total_cmds;		/* total CMDs since VM is started */
 +	uint64_t submitted_cmds;	/* CMDs submitted in current slice */
 +	uint64_t allocated_cmds;	/* CMDs allocated in current slice */
++
++	uint32_t pipe_last_vblank[I915_MAX_PIPES];	/* used for vblank virtualization*/
 +};
 +
 +enum vgt_owner_type {
@@ -32373,6 +33294,8 @@ index 0000000..21dfc28
 +	VGT_DISABLE_VGA,
 +	UEVENT_MAX
 +};
++
++#define HOTPLUG_VMID_FOR_ALL_VMS	0xff
 +
 +#define VGT_MAX_UEVENT_VARS 20
 +struct vgt_uevent_info {
@@ -32488,7 +33411,6 @@ index 0000000..21dfc28
 +	uint64_t rsvd_aperture_base;
 +	uint64_t scratch_page;		/* page used for data written from GPU */
 +	uint64_t ctx_switch_rb_page;	/* page used as ring buffer for context switch */
-+	uint64_t batch_buffer_page;	/* page used to map batch buffer */
 +	uint64_t dummy_area;
 +
 +	struct vgt_device *device[VGT_MAX_VMS];	/* a list of running VMs */
@@ -32525,6 +33447,9 @@ index 0000000..21dfc28
 +
 +	uint32_t opregion_pa;
 +	void *opregion_va;
++
++	bool dom0_irq_pending;
++	int dom0_irq_cpu;
 +};
 +
 +/*
@@ -32551,6 +33476,14 @@ index 0000000..21dfc28
 +	 (d->next_sched_vgt != current_render_owner(pdev)))
 +#define vgt_ctx_check(d)		(d->ctx_check)
 +#define vgt_ctx_switch(d)		(d->ctx_switch)
++#define vgt_has_pipe_enabled(vgt, pipe)						\
++		(vgt && ((pipe) >= PIPE_A) && ((pipe) < I915_MAX_PIPES) &&	\
++		(__vreg((vgt), VGT_PIPECONF(pipe)) & _REGBIT_PIPE_ENABLE))
++#define pdev_has_pipe_enabled(pdev, pipe)					\
++		(pdev && ((pipe) >= PIPE_A) && ((pipe) < I915_MAX_PIPES) &&	\
++		(__vreg(current_display_owner(pdev),				\
++			VGT_PIPECONF(pipe)) & _REGBIT_PIPE_ENABLE))
++
 +extern void do_vgt_fast_display_switch(struct vgt_device *pdev);
 +
 +#define reg_addr_fix(pdev, reg)		(pdev->reg_info[REG_INDEX(reg)] & VGT_REG_ADDR_FIX)
@@ -32580,13 +33513,9 @@ index 0000000..21dfc28
 + */
 +static inline void vgt_panic(void)
 +{
-+	int i;
 +	struct pgt_device *pdev = &default_device;
 +
-+	for (i = 0; i < pdev->max_engines; i++) {
-+		show_debug(pdev, i);
-+		show_ringbuffer(pdev, i, 64);
-+	}
++	show_debug(pdev);
 +
 +	dump_stack();
 +	printk("________end of stack dump_________\n");
@@ -32708,6 +33637,7 @@ index 0000000..21dfc28
 +#define VGT_REQUEST_IRQ		0	/* a new irq pending from device */
 +#define VGT_REQUEST_UEVENT	1
 +#define VGT_REQUEST_CTX_SWITCH	2	/* immediate reschedule(context switch) requested */
++#define VGT_REQUEST_EMUL_DPY_EVENTS	3
 +
 +static inline void vgt_raise_request(struct pgt_device *pdev, uint32_t flag)
 +{
@@ -33433,6 +34363,8 @@ index 0000000..21dfc28
 +		_REGBIT_CFG_COMMAND_MEMORY;
 +}
 +
++#define VGT_DPY_EMUL_PERIOD	16000000	// 16 ms for now
++
 +struct vgt_irq_host_state;
 +typedef void (*vgt_event_phys_handler_t)(struct vgt_irq_host_state *hstate,
 +	enum vgt_event_type event);
@@ -33491,6 +34423,11 @@ index 0000000..21dfc28
 +	vgt_event_virt_handler_t	v_handler;	/* for v_event */
 +};
 +
++struct vgt_emul_timer {
++	struct hrtimer timer;
++	u64 period;
++};
++
 +/* structure containing device specific IRQ state */
 +struct vgt_irq_host_state {
 +	struct pgt_device *pdev;
@@ -33500,6 +34437,7 @@ index 0000000..21dfc28
 +	struct vgt_irq_info	*info[IRQ_INFO_MAX];
 +	struct vgt_event_info	events[EVENT_MAX];
 +	DECLARE_BITMAP(pending_events, EVENT_MAX);
++	struct vgt_emul_timer dpy_timer;
 +};
 +
 +#define vgt_get_event_phys_handler(h, e)	(h->events[e].p_handler)
@@ -33550,6 +34488,8 @@ index 0000000..21dfc28
 +
 +
 +void vgt_forward_events(struct pgt_device *pdev);
++void vgt_emulate_dpy_events(struct pgt_device *pdev);
++void vgt_manage_emul_dpy_events(struct pgt_device *pdev);
 +void vgt_install_irq(struct pci_dev *pdev);
 +int vgt_irq_init(struct pgt_device *pgt);
 +void vgt_irq_exit(struct pgt_device *pgt);
@@ -33561,11 +34501,15 @@ index 0000000..21dfc28
 +
 +void vgt_signal_uevent(struct pgt_device *dev);
 +
++u32 vgt_recalculate_mask_bits(struct pgt_device *pdev, unsigned int reg);
++
 +bool vgt_reg_imr_handler(struct vgt_device *vgt,
 +	unsigned int reg, void *p_data, unsigned int bytes);
 +bool vgt_reg_ier_handler(struct vgt_device *vgt,
 +	unsigned int reg, void *p_data, unsigned int bytes);
 +bool vgt_reg_iir_handler(struct vgt_device *vgt, unsigned int reg,
++	void *p_data, unsigned int bytes);
++bool vgt_reg_isr_handler(struct vgt_device *vgt, unsigned int reg,
 +	void *p_data, unsigned int bytes);
 +void vgt_reg_watchdog_handler(struct vgt_device *state,
 +	uint32_t reg, uint32_t val, bool write, ...);
@@ -33593,6 +34537,24 @@ index 0000000..21dfc28
 +void free_vm_rsvd_aperture(struct vgt_device *vgt);
 +void initialize_gm_fence_allocation_bitmaps(struct pgt_device *pdev);
 +void vgt_init_reserved_aperture(struct pgt_device *pdev);
++bool vgt_map_plane_reg(struct vgt_device *vgt, unsigned int reg, unsigned int *p_real_offset);
++
++
++static inline void vgt_set_pipe_mapping(struct vgt_device *vgt,
++	unsigned int v_pipe, unsigned int p_pipe)
++{
++	/* p_pipe == I915_MAX_PIPES means an invalid p_pipe */
++	if (v_pipe < I915_MAX_PIPES && p_pipe <= I915_MAX_PIPES) {
++		vgt->pipe_mapping[v_pipe] = p_pipe;
++	}
++	else {
++		vgt_err("v_pipe=%d, p_pipe=%d!\n", v_pipe, p_pipe);
++		WARN_ON(1);
++	}
++}
++
++bool rebuild_pipe_mapping(struct vgt_device *vgt, unsigned int reg, uint32_t wr_data);
++bool update_pipe_mapping(struct vgt_device *vgt, unsigned int physical_reg, uint32_t physical_wr_data);
 +
 +int create_vgt_instance(struct pgt_device *pdev, struct vgt_device **ptr_vgt, vgt_params_t vp);
 +void vgt_release_instance(struct vgt_device *vgt);
@@ -33606,6 +34568,7 @@ index 0000000..21dfc28
 +extern void vgt_probe_dpcd(struct pgt_device *pdev, int index);
 +extern void vgt_propagate_dpcd(struct vgt_device *vgt, int index);
 +extern void vgt_clear_dpcd(struct vgt_device *vgt, int index);
++void vgt_update_monitor_status(struct vgt_device *vgt);
 +
 +bool default_mmio_read(struct vgt_device *vgt, unsigned int offset,	void *p_data, unsigned int bytes);
 +bool default_mmio_write(struct vgt_device *vgt, unsigned int offset, void *p_data, unsigned int bytes);
@@ -33616,6 +34579,9 @@ index 0000000..21dfc28
 +	void *p_data, unsigned int bytes);
 +
 +bool ring_mmio_write(struct vgt_device *vgt, unsigned int off,
++	void *p_data, unsigned int bytes);
++
++bool ring_uhptr_write(struct vgt_device *vgt, unsigned int off,
 +	void *p_data, unsigned int bytes);
 +
 +extern bool gtt_mmio_read(struct vgt_device *vgt, unsigned int off,
@@ -33668,6 +34634,7 @@ index 0000000..21dfc28
 +extern void vgt_submit_commands(struct vgt_device *vgt, int ring_id);
 +extern void vgt_sched_update_prev(struct vgt_device *vgt, cycles_t time);
 +extern void vgt_sched_update_next(struct vgt_device *vgt);
++extern void vgt_schedule(struct pgt_device *pdev);
 +
 +/* klog facility for buck printk */
 +extern int vgt_klog_init(void);
@@ -33679,18 +34646,6 @@ index 0000000..21dfc28
 +	u64 *stat;
 +} debug_statistics_t;
 +
-+extern u64 gtt_mmio_rcnt;
-+extern u64 gtt_mmio_wcnt;
-+extern u64 gtt_mmio_wcycles;
-+extern u64 gtt_mmio_rcycles;
-+extern u64 mmio_rcnt;
-+extern u64 mmio_wcnt;
-+extern u64 mmio_wcycles;
-+extern u64 mmio_rcycles;
-+extern u64 ring_mmio_rcnt;
-+extern u64 ring_mmio_wcnt;
-+extern u64 ring_tail_mmio_wcnt;
-+extern u64 ring_tail_mmio_wcycles;
 +extern u64 context_switch_cost;
 +extern u64 context_switch_num;
 +extern u64 ring_0_idle;
@@ -33773,7 +34728,7 @@ index 0000000..21dfc28
 +int hvm_get_parameter_by_dom(domid_t domid, int idx, uint64_t *value);
 +int xen_get_nr_vcpu(int vm_id);
 +int vgt_hvm_set_trap_area(struct vgt_device *vgt);
-+int vgt_hvm_map_apperture (struct vgt_device *vgt, int map);
++int vgt_hvm_map_aperture (struct vgt_device *vgt, int map);
 +int setup_gtt(struct pgt_device *pdev);
 +void check_gtt(struct pgt_device *pdev);
 +void free_gtt(struct pgt_device *pdev);
@@ -33853,6 +34808,18 @@ index 15472d6..8e1711b 100644
 +#define VGT_DEVFN	0x10	/* B:D:F = 0:2:0 */
  
  #endif /* LINUX_PCI_H */
+diff --git a/include/xen/events.h b/include/xen/events.h
+index c6bfe01..11c6dbf 100644
+--- a/include/xen/events.h
++++ b/include/xen/events.h
+@@ -47,6 +47,7 @@ void evtchn_put(unsigned int evtchn);
+ void xen_send_IPI_one(unsigned int cpu, enum ipi_vector vector);
+ int resend_irq_on_evtchn(unsigned int irq);
+ void rebind_evtchn_irq(int evtchn, int irq);
++int xen_get_cpu_from_irq(unsigned int irq);
+ 
+ static inline void notify_remote_via_evtchn(int port)
+ {
 diff --git a/include/xen/fb_decoder.h b/include/xen/fb_decoder.h
 new file mode 100644
 index 0000000..f7dfad4
@@ -33977,10 +34944,10 @@ diff --git a/include/xen/interface/domctl.h b/include/xen/interface/domctl.h
 new file mode 100644
 index 0000000..e69de29
 diff --git a/include/xen/interface/hvm/hvm_op.h b/include/xen/interface/hvm/hvm_op.h
-index 956a046..226c1e3 100644
+index 956a046..ee9ba42 100644
 --- a/include/xen/interface/hvm/hvm_op.h
 +++ b/include/xen/interface/hvm/hvm_op.h
-@@ -42,7 +42,47 @@ struct xen_hvm_pagetable_dying {
+@@ -42,7 +42,36 @@ struct xen_hvm_pagetable_dying {
  };
  typedef struct xen_hvm_pagetable_dying xen_hvm_pagetable_dying_t;
  DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_pagetable_dying_t);
@@ -33998,17 +34965,6 @@ index 956a046..226c1e3 100644
 +};
 +typedef struct xen_hvm_inject_msi xen_hvm_inject_msi_t;
 +DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_inject_msi_t);
-+
-+#include <xen/interface/vcpu.h>
-+#define HVMOP_vgt_set_trap_io       17
-+struct xen_hvm_vgt_set_trap_io {
-+	uint16_t domid;
-+    uint16_t nr_pio_frags;
-+    struct trap_frags	pio_frags[MAX_TRAP_FRAGS];
-+    uint16_t nr_mmio_frags;
-+    struct trap_frags	mmio_frags[MAX_TRAP_FRAGS];
-+};
-+typedef struct xen_hvm_vgt_set_trap_io xen_hvm_vgt_set_trap_io_t;
 +
 +#define HVMOP_vgt_map_mmio           18
 +struct xen_hvm_vgt_map_mmio {
@@ -34029,7 +34985,7 @@ index 956a046..226c1e3 100644
  enum hvmmem_type_t {
      HVMMEM_ram_rw,             /* Normal read/write guest RAM */
      HVMMEM_ram_ro,             /* Read-only; writes are discarded */
-@@ -62,4 +102,13 @@ struct xen_hvm_get_mem_type {
+@@ -62,4 +91,13 @@ struct xen_hvm_get_mem_type {
  };
  DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_get_mem_type);
  
@@ -34258,10 +35214,10 @@ index 5e36932..fc48aad 100644
  	} u;
  };
 diff --git a/include/xen/interface/vcpu.h b/include/xen/interface/vcpu.h
-index 87e6f8a..4beeded 100644
+index 87e6f8a..778927d 100644
 --- a/include/xen/interface/vcpu.h
 +++ b/include/xen/interface/vcpu.h
-@@ -170,4 +170,68 @@ struct vcpu_register_vcpu_info {
+@@ -170,4 +170,53 @@ struct vcpu_register_vcpu_info {
  };
  DEFINE_GUEST_HANDLE_STRUCT(vcpu_register_vcpu_info);
  
@@ -34294,21 +35250,6 @@ index 87e6f8a..4beeded 100644
 +};
 +DEFINE_GUEST_HANDLE_STRUCT(vcpu_emul_ioreq);
 +
-+/* Activate I/O self-forwarding for the specified VCPU */
-+#define VCPUOP_start_io_forward           15
-+struct trap_frags {
-+    uint64_t   s;   /* start address */
-+    uint64_t   e;   /* end address */
-+};
-+
-+#define MAX_TRAP_FRAGS	32
-+struct vcpu_io_forwarding_request {
-+    int16_t      nr_pio_frags;
-+    struct trap_frags	  pio_frags[MAX_TRAP_FRAGS];
-+    int16_t      nr_mmio_frags;  /* 0..max-1, -1 means let VMM fill */
-+    struct trap_frags	  mmio_frags[MAX_TRAP_FRAGS];	/*s/e address */
-+};
-+
 +#define VCPUOP_get_sysdata           16
 +/* sub operations */
 +#define VCPUOP_sysdata_get_segment   0
@@ -34331,7 +35272,7 @@ index 87e6f8a..4beeded 100644
 +
  #endif /* __XEN_PUBLIC_VCPU_H__ */
 diff --git a/include/xen/interface/xen.h b/include/xen/interface/xen.h
-index 886a5d8..1c574ef 100644
+index 886a5d8..b9851cf 100644
 --- a/include/xen/interface/xen.h
 +++ b/include/xen/interface/xen.h
 @@ -57,6 +57,7 @@
@@ -34351,7 +35292,7 @@ index 886a5d8..1c574ef 100644
  /* Architecture-specific VIRQ definitions. */
  #define VIRQ_ARCH_0    16
  #define VIRQ_ARCH_1    17
-@@ -526,6 +529,64 @@ struct tmem_op {
+@@ -526,6 +529,83 @@ struct tmem_op {
  
  DEFINE_GUEST_HANDLE(u64);
  
@@ -34402,13 +35343,32 @@ index 886a5d8..1c574ef 100644
 +#define XEN_DOMCTL_INTERFACE_VERSION 0x00000009
 +#define XEN_DOMCTL_pausedomain                    3
 +#define XEN_DOMCTL_getdomaininfo                  5
++
++#define XEN_DOMCTL_vgt_io_trap			  700
++
++#define MAX_VGT_IO_TRAP_INFO 4
++
++struct vgt_io_trap_info {
++        uint64_t s;
++        uint64_t e;
++};
++
++struct xen_domctl_vgt_io_trap {
++        uint32_t n_pio;
++        struct vgt_io_trap_info pio[MAX_VGT_IO_TRAP_INFO];
++
++        uint32_t n_mmio;
++        struct vgt_io_trap_info mmio[MAX_VGT_IO_TRAP_INFO];
++};
++
 +struct xen_domctl {
 +	uint32_t cmd;
 +	uint32_t interface_version; /* XEN_DOMCTL_INTERFACE_VERSION */
 +	domid_t  domain;
 +	union {
 +		struct xen_domctl_getdomaininfo     getdomaininfo;
-+		uint8_t                             pad[128];
++		struct xen_domctl_vgt_io_trap       vgt_io_trap;
++		uint8_t                             pad[256];
 +	}u;
 +};
 +DEFINE_GUEST_HANDLE_STRUCT(xen_domctl);
@@ -34418,10 +35378,10 @@ index 886a5d8..1c574ef 100644
  /* In assembly code we cannot use C numeric constant suffixes. */
 diff --git a/include/xen/vgt-if.h b/include/xen/vgt-if.h
 new file mode 100644
-index 0000000..e531ba6
+index 0000000..f10ca22
 --- /dev/null
 +++ b/include/xen/vgt-if.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,107 @@
 +/*
 + * Interface between Gfx dricer and vGT enabled hypervisor
 + *
@@ -34453,7 +35413,12 @@ index 0000000..e531ba6
 +
 +/* Reserve 32KB for vGT shared infor: 0x78000-0x7FFFF */
 +#define VGT_PVINFO_PAGE	0x78000
-+#define VGT_PVINFO_SIZE	0x8000
++
++/* XXX: the 32KB range conflicts with PIPE_EDP_CONF: 0x7f008, so let's change
++ * to reserve only 4KB for now.
++ */
++//#define VGT_PVINFO_SIZE	0x8000
++#define VGT_PVINFO_SIZE	0x1000
 +
 +/*
 + * The following structure pages are defined in GEN MMIO space for virtualization.
@@ -34526,10 +35491,10 @@ index 0000000..e531ba6
 +#endif /* _VGT_IF_H */
 diff --git a/include/xen/vgt.h b/include/xen/vgt.h
 new file mode 100644
-index 0000000..9bd34d6
+index 0000000..be1d3a7
 --- /dev/null
 +++ b/include/xen/vgt.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,131 @@
 +/*
 + * vgt.h: core header file for vGT driver
 + *
@@ -34554,6 +35519,11 @@ index 0000000..9bd34d6
 + * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 + * SOFTWARE.
 + */
++
++#ifndef _VGT_H_
++#define _VGT_H_
++
++#include <linux/interrupt.h>
 +
 +// structures
 +struct vgt_device;
@@ -34611,6 +35581,8 @@ index 0000000..9bd34d6
 +        unsigned long val);
 +
 +extern int hcall_vgt_ctrl(unsigned long ctrl_op);
++
++extern int vgt_io_trap(struct xen_domctl *ctl);
 +/*
 + * if this macro is defined, vgt will map GMA [0,64M] to the same page as [128M,192M] in GTT
 + * this macro should be used together with DOM0_NON_IDENTICAL macro
@@ -34623,8 +35595,37 @@ index 0000000..9bd34d6
 +*/
 +#define VGT_ENABLE_ADDRESS_FIX_SAVE_RESTORE
 +
++DECLARE_PER_CPU(u8, in_vgt);
++
++/*
++ * in_vgt flag is used to indicate whether current code
++ * path is in vgt core module, which is key for virtual
++ * irq delivery in de-privileged dom0 framework. So use
++ * get_cpu/put_cpu here to avoid preemption, otherwise
++ * this flag loses its intention.
++ */
++static inline int vgt_enter(void)
++{
++	int cpu = get_cpu();
++
++	per_cpu(in_vgt, cpu)++;
++	return cpu;
++}
++
++extern void inject_dom0_virtual_interrupt(void *info);
++static inline void vgt_exit(int cpu)
++{
++	per_cpu(in_vgt, cpu)--;
++
++	/* check for delayed virq injection */
++	inject_dom0_virtual_interrupt(NULL);
++
++	put_cpu();
++}
++
 +// MMIO definitions
 +
++#endif	/* _VGT_H_ */
 diff --git a/include/xen/xen-ops.h b/include/xen/xen-ops.h
 index d6fe062..e1cb89d 100644
 --- a/include/xen/xen-ops.h
@@ -35618,7 +36619,7 @@ index 0000000..a5651d4
 +	show_reginfo()
 diff --git a/vgt.rules b/vgt.rules
 new file mode 100644
-index 0000000..efb932e
+index 0000000..cb4da5e
 --- /dev/null
 +++ b/vgt.rules
 @@ -0,0 +1,61 @@
@@ -35650,9 +36651,9 @@ index 0000000..efb932e
 +# bit field definition of the hot_plug trigger value:
 +#
 +# bit 31 - bit 16	: Reserved;
-+# bit 15 - bit 8	: vmid; Warning since vmid can be used out if you keep on destory & recreate the same VM or you create so many VMs
-+#					  Now we only use 0 as vmid in our command  and by default forward virtual_event for all other live VMs.
-+#					  In future, we will redesign this command to avoid vmid out of range.  
++# bit 15 - bit 8	: vmid; Warning: vmid can be used out if you keep on destory & recreate VMs.
++#					Right now the maximum vmid supported in hotplug is 254(0xfe)
++#					vmid 255 (0xff) has special meaning to send interrupt for all VMs including dom0.
 +# bit 7 - bit 4		: Reserved;
 +# bit 3 - bit 1		: Port/monitor selection:
 +# 		0	-	CRT
@@ -35671,15 +36672,15 @@ index 0000000..efb932e
 +#KERNEL=="control", RUN+="/bin/sh -c 'echo inserted >> /tmp/hotplug'"
 +#
 +#write 0x0f1(241) for plug in; 0x0f0(240) for pull out.
-+ACTION=="remove", KERNEL=="control", ENV{CRT_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xf0 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{CRT_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xf1 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_A_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xf2 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_A_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xf3 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_B_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xf4 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_B_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xf5 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_C_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xf6 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_C_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xf7 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_D_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xf8 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_D_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xf9 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="remove", KERNEL=="control", ENV{CRT_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff0 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="add", KERNEL=="control", ENV{CRT_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff1 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="remove", KERNEL=="control", ENV{PORT_A_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff2 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="add", KERNEL=="control", ENV{PORT_A_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff3 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="remove", KERNEL=="control", ENV{PORT_B_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff4 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="add", KERNEL=="control", ENV{PORT_B_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff5 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="remove", KERNEL=="control", ENV{PORT_C_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff6 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="add", KERNEL=="control", ENV{PORT_C_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff7 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="remove", KERNEL=="control", ENV{PORT_D_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff8 > /sys/kernel/vgt/control/virtual_event'"
++ACTION=="add", KERNEL=="control", ENV{PORT_D_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff9 > /sys/kernel/vgt/control/virtual_event'"
 +ACTION=="add", KERNEL=="control", ENV{VGT_ENABLE_VGA}=="1", RUN+="/bin/sh -c 'echo VM_$env{VMID}_enable_VGA_mode >> /tmp/vgt-log'"
 +ACTION=="add", KERNEL=="control", ENV{VGT_ENABLE_VGA}=="0", RUN+="/bin/sh -c 'echo VM_$env{VMID}_disable_VGA_mode >> /tmp/vgt-log'"
