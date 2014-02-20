@@ -1,3 +1,3 @@
 linux-vgt.patch:
-	The patch should be applied to linux-3.8.13.4:
-	see http://kernel.ubuntu.com/git?p=ubuntu/linux.git;a=commitdiff;h=d1baa1360260b5a01938674fc518109a4e5a148d
+	The patch should be applied to linux-3.11.6:
+	see http://kernel.ubuntu.com/git?p=ubuntu/ubuntu-saucy.git;a=commitdiff;h=549fad2377f797d330565a7a7669b478ba474091
