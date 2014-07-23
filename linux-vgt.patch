@@ -6434,10 +6434,10 @@ index 0000000..284642b
 +}
 diff --git a/config-3.11.6-dom0 b/config-3.11.6-dom0
 new file mode 100644
-index 0000000..fc10897
+index 0000000..efff000
 --- /dev/null
 +++ b/config-3.11.6-dom0
-@@ -0,0 +1,3913 @@
+@@ -0,0 +1,3914 @@
 +#
 +# Automatically generated file; DO NOT EDIT.
 +# Linux/x86 3.11.6-vgt Kernel Configuration
@@ -7515,7 +7515,8 @@ index 0000000..fc10897
 +# Generic Driver Options
 +#
 +CONFIG_UEVENT_HELPER_PATH="/sbin/hotplug"
-+# CONFIG_DEVTMPFS is not set
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
 +CONFIG_STANDALONE=y
 +CONFIG_PREVENT_FIRMWARE_BUILD=y
 +CONFIG_FW_LOADER=y
@@ -10948,7 +10949,7 @@ index 2f09e80..419f360 100644
  int sandybridge_pcode_write(struct drm_i915_private *dev_priv, u8 mbox, u32 val);
  
 diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
-index d9e2208..9fe0338 100644
+index d9e2208..c8830f0 100644
 --- a/drivers/gpu/drm/i915/i915_gem.c
 +++ b/drivers/gpu/drm/i915/i915_gem.c
 @@ -115,6 +115,13 @@ i915_gem_wait_for_error(struct i915_gpu_error *error)
@@ -10985,7 +10986,21 @@ index d9e2208..9fe0338 100644
  int
  i915_gem_init_ioctl(struct drm_device *dev, void *data,
  		    struct drm_file *file)
-@@ -3627,6 +3647,10 @@ i915_gem_object_pin(struct drm_i915_gem_object *obj,
+@@ -3130,6 +3150,13 @@ search_free:
+ 
+ 		i915_gem_object_unpin_pages(obj);
+ 		kfree(node);
++
++		DRM_ERROR("fail to allocate space from %s GM space, size: %u.\n",
++				map_and_fenceable ? "low" : "whole",
++				size);
++
++		dump_stack();
++
+ 		return ret;
+ 	}
+ 	if (WARN_ON(!i915_gem_valid_gtt_space(dev, node, obj->cache_level))) {
+@@ -3627,6 +3654,10 @@ i915_gem_object_pin(struct drm_i915_gem_object *obj,
  	if (WARN_ON(obj->pin_count == DRM_I915_GEM_OBJECT_MAX_PIN_COUNT))
  		return -EBUSY;
  
@@ -10996,7 +11011,7 @@ index d9e2208..9fe0338 100644
  	if (obj->gtt_space != NULL) {
  		if ((alignment && obj->gtt_offset & (alignment - 1)) ||
  		    (map_and_fenceable && !obj->map_and_fenceable)) {
-@@ -3668,6 +3692,11 @@ i915_gem_object_pin(struct drm_i915_gem_object *obj,
+@@ -3668,6 +3699,11 @@ i915_gem_object_pin(struct drm_i915_gem_object *obj,
  void
  i915_gem_object_unpin(struct drm_i915_gem_object *obj)
  {
@@ -11008,7 +11023,7 @@ index d9e2208..9fe0338 100644
  	BUG_ON(obj->pin_count == 0);
  	BUG_ON(obj->gtt_space == NULL);
  
-@@ -3975,6 +4004,9 @@ void i915_gem_free_object(struct drm_gem_object *gem_obj)
+@@ -3975,6 +4011,9 @@ void i915_gem_free_object(struct drm_gem_object *gem_obj)
  	if (obj->base.import_attach)
  		drm_prime_gem_destroy(&obj->base, NULL);
  
@@ -11018,7 +11033,7 @@ index d9e2208..9fe0338 100644
  	drm_gem_object_release(&obj->base);
  	i915_gem_info_remove_obj(dev_priv, obj->base.size);
  
-@@ -4340,6 +4372,12 @@ i915_gem_load(struct drm_device *dev)
+@@ -4340,6 +4379,12 @@ i915_gem_load(struct drm_device *dev)
  	else
  		dev_priv->num_fence_regs = 8;
  
@@ -11621,10 +11636,10 @@ index 537545b..df17660 100644
  		 * same swizzling setup.
 diff --git a/drivers/gpu/drm/i915/i915_gem_vgtbuffer.c b/drivers/gpu/drm/i915/i915_gem_vgtbuffer.c
 new file mode 100644
-index 0000000..0f06f88
+index 0000000..2cb37c4
 --- /dev/null
 +++ b/drivers/gpu/drm/i915/i915_gem_vgtbuffer.c
-@@ -0,0 +1,505 @@
+@@ -0,0 +1,480 @@
 +/*
 + * Copyright © 2012 Intel Corporation
 + *
@@ -11917,7 +11932,7 @@ index 0000000..0f06f88
 +	struct vgt_fb_format *fb;
 +	struct vgt_pipe_format *pipe;
 +
-+	int i, found, ret;
++	int ret;
 +
 +	loff_t first_data_page, last_data_page;
 +	int num_pages = 0;
@@ -11942,42 +11957,17 @@ index 0000000..0f06f88
 +		return -EINVAL;
 +	}
 +
-+	/*
-+	 * Find the pipe id we are interested in.
-+	 * If the phys_pipe_id is outside the bounds of the pipe
-+	 * array, default to the first enabled (used for thumbnails)
-+	 */
 +	fb = &obj->fb;
-+	found = 0;
-+	DRM_DEBUG_DRIVER("VGT: finding pipe\n");
-+	if (args->phys_pipe_id < I915_MAX_PIPES) {
-+		for (i = 0; i < I915_MAX_PIPES; i++) {
-+			pipe = &fb->pipes[i];
-+			if (pipe->physical_pipe_id == args->phys_pipe_id) {
-+				found = 1;
-+				break;
-+			}
-+		}
-+	}
++	pipe = ((args->pipe_id >= I915_MAX_PIPES) ?
++				NULL : &fb->pipes[args->pipe_id]);
 +
-+	if (!found) {
-+		for (i = 0; i < I915_MAX_PIPES; i++) {
-+			pipe = &fb->pipes[i];
-+			if (pipe->primary.enabled) {
-+				found = 1;
-+				break;
-+			}
-+		}
-+	}
-+
-+	/* If we still don't have anything, bail */
-+	if (!found) {
++	/* If plane is not enabled, bail */
++	if (!pipe || !pipe->primary.enabled) {
 +		kfree(obj);
 +		return -ENOENT;
 +	}
-+
-+	args->pipe_id = i;
-+	DRM_DEBUG_DRIVER("VGT: pipe = %d\n", i);
++ 
++	DRM_DEBUG_DRIVER("VGT: pipe = %d\n", args->pipe_id);
 +	if((args->plane_id) == I915_VGT_PLANE_PRIMARY) {
 +	  DRM_DEBUG_DRIVER("VGT: &pipe=0x%x\n",(&pipe));
 +		p = &pipe->primary;
@@ -12131,7 +12121,7 @@ index 0000000..0f06f88
 +	return 0;
 +}
 diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
-index 46d46ba..f9be61d 100644
+index 46d46ba..3933295 100644
 --- a/drivers/gpu/drm/i915/i915_irq.c
 +++ b/drivers/gpu/drm/i915/i915_irq.c
 @@ -1192,13 +1192,18 @@ static irqreturn_t ivybridge_irq_handler(int irq, void *arg)
@@ -12201,7 +12191,24 @@ index 46d46ba..f9be61d 100644
  	for_each_ring(ring, dev_priv, i) {
  		u32 seqno, acthd;
  		bool busy = true;
-@@ -2660,6 +2682,13 @@ static void ivybridge_irq_preinstall(struct drm_device *dev)
+@@ -2581,8 +2603,14 @@ void i915_hangcheck_elapsed(unsigned long data)
+ 		}
+ 	}
+ 
+-	if (rings_hung)
+-		return i915_handle_error(dev, true);
++	if (rings_hung) {
++#ifdef DRM_I915_VGT_SUPPORT
++		if (dev_priv->in_xen_vgt)
++			return vgt_handle_dom0_device_reset();
++		else
++#endif
++			return i915_handle_error(dev, true);
++	}
+ 
+ 	if (busy_count)
+ 		/* Reset timer case chip hangs without another request
+@@ -2660,6 +2688,13 @@ static void ivybridge_irq_preinstall(struct drm_device *dev)
  	POSTING_READ(GEN6_PMIER);
  
  	ibx_irq_preinstall(dev);
@@ -12215,7 +12222,7 @@ index 46d46ba..f9be61d 100644
  }
  
  static void valleyview_irq_preinstall(struct drm_device *dev)
-@@ -2820,8 +2849,14 @@ static int ivybridge_irq_postinstall(struct drm_device *dev)
+@@ -2820,8 +2855,14 @@ static int ivybridge_irq_postinstall(struct drm_device *dev)
  
  	dev_priv->irq_mask = ~display_mask;
  
@@ -12232,7 +12239,7 @@ index 46d46ba..f9be61d 100644
  	I915_WRITE(DEIIR, I915_READ(DEIIR));
  	I915_WRITE(DEIMR, dev_priv->irq_mask);
  	I915_WRITE(DEIER,
-@@ -3602,6 +3637,10 @@ static void i915_reenable_hotplug_timer_func(unsigned long data)
+@@ -3602,6 +3643,10 @@ static void i915_reenable_hotplug_timer_func(unsigned long data)
  	unsigned long irqflags;
  	int i;
  
@@ -12243,7 +12250,7 @@ index 46d46ba..f9be61d 100644
  	spin_lock_irqsave(&dev_priv->irq_lock, irqflags);
  	for (i = (HPD_NONE + 1); i < HPD_NUM_PINS; i++) {
  		struct drm_connector *connector;
-@@ -3644,6 +3683,14 @@ void intel_irq_init(struct drm_device *dev)
+@@ -3644,6 +3689,14 @@ void intel_irq_init(struct drm_device *dev)
  	setup_timer(&dev_priv->hotplug_reenable_timer, i915_reenable_hotplug_timer_func,
  		    (unsigned long) dev_priv);
  
@@ -12283,7 +12290,7 @@ index b042ee5..77370ab 100644
  		intel_crtc->ddi_pll_sel = intel_ddi_get_crtc_pll(dev_priv,
  								 pipe);
 diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
-index 90a7c17..a39c191 100644
+index 90a7c17..5cdda81 100644
 --- a/drivers/gpu/drm/i915/intel_display.c
 +++ b/drivers/gpu/drm/i915/intel_display.c
 @@ -1693,6 +1693,7 @@ static void intel_disable_pipe(struct drm_i915_private *dev_priv,
@@ -12319,6 +12326,41 @@ index 90a7c17..a39c191 100644
  }
  
  /* Manual link training for Ivy Bridge A0 parts */
+@@ -8709,6 +8712,8 @@ static int intel_crtc_set_config(struct drm_mode_set *set)
+ 	struct drm_mode_set save_set;
+ 	struct intel_set_config *config;
+ 	int ret;
++	
++	drm_i915_private_t *dev_priv;
+ 
+ 	BUG_ON(!set);
+ 	BUG_ON(!set->crtc);
+@@ -8727,6 +8732,7 @@ static int intel_crtc_set_config(struct drm_mode_set *set)
+ 	}
+ 
+ 	dev = set->crtc->dev;
++	dev_priv = dev->dev_private;
+ 
+ 	ret = -ENOMEM;
+ 	config = kzalloc(sizeof(*config), GFP_KERNEL);
+@@ -8763,6 +8769,17 @@ static int intel_crtc_set_config(struct drm_mode_set *set)
+ 					  set->x, set->y, set->fb);
+ 	}
+ 
++#ifdef DRM_I915_VGT_SUPPORT
++		if (dev_priv->in_xen_vgt == true) {
++			/*
++			 * Tell VGT that we have a valid surface to show
++			 * after modesetting. We doesn't distinguish DOM0 and
++			 * Linux guest here, The PVINFO write handler will
++			 * handle this.
++			 */
++			I915_WRITE(vgt_info_off(display_ready), 1);		
++		}
++#endif
+ 	if (ret) {
+ 		DRM_DEBUG_KMS("failed to set mode on [CRTC:%d], err = %d\n",
+ 			      set->crtc->base.id, ret);
 diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
 index 079ef01..02f65a8 100644
 --- a/drivers/gpu/drm/i915/intel_ringbuffer.c
@@ -12483,23 +12525,6 @@ index 5e8be46..c7ca254 100644
 +EXPORT_SYMBOL(resend_irq_on_evtchn);
 +EXPORT_SYMBOL(bind_virq_to_irq);
 +EXPORT_SYMBOL(xen_get_cpu_from_irq);
-diff --git a/drivers/xen/swiotlb-xen.c b/drivers/xen/swiotlb-xen.c
-index aadffcf..5e580eb 100644
---- a/drivers/xen/swiotlb-xen.c
-+++ b/drivers/xen/swiotlb-xen.c
-@@ -149,7 +149,12 @@ xen_swiotlb_fixup(void *buf, size_t size, unsigned long nslabs)
- static unsigned long xen_set_nslabs(unsigned long nr_tbl)
- {
- 	if (!nr_tbl) {
-+#ifdef CONFIG_XEN_VGT_EMULATOR
-+		/* double the table size since vGT will use quite some of it */
-+		xen_io_tlb_nslabs = (128 * 1024 * 1024 >> IO_TLB_SHIFT);
-+#else
- 		xen_io_tlb_nslabs = (64 * 1024 * 1024 >> IO_TLB_SHIFT);
-+#endif
- 		xen_io_tlb_nslabs = ALIGN(xen_io_tlb_nslabs, IO_TLB_SEGSIZE);
- 	} else
- 		xen_io_tlb_nslabs = nr_tbl;
 diff --git a/drivers/xen/vgt/Makefile b/drivers/xen/vgt/Makefile
 new file mode 100644
 index 0000000..a5c975a
@@ -12517,7 +12542,7 @@ index 0000000..a5c975a
 +obj-$(CONFIG_XEN_VGT_I915)		+= xen_vgt.o
 diff --git a/drivers/xen/vgt/aperture_gm.c b/drivers/xen/vgt/aperture_gm.c
 new file mode 100644
-index 0000000..cd25eb8
+index 0000000..2c1a012
 --- /dev/null
 +++ b/drivers/xen/vgt/aperture_gm.c
 @@ -0,0 +1,344 @@
@@ -12568,7 +12593,7 @@ index 0000000..cd25eb8
 +	ASSERT((reg < _REG_FENCE_0_LOW) || (reg > _REG_FENCE_15_HIGH));
 +
 +	mask = reg_aux_addr_mask(pdev, reg);
-+	vgt_dbg("vGT: address fix g->h for reg (0x%lx) value (0x%x) mask (0x%x)\n", reg, g_value, mask);
++	vgt_dbg(VGT_DBG_MEM, "vGT: address fix g->h for reg (0x%lx) value (0x%x) mask (0x%x)\n", reg, g_value, mask);
 +	/*
 +	 * NOTE: address ZERO is special, and sometimes the driver may hard
 +	 * code address ZERO, e.g. in curbase setting (when the cursor becomes
@@ -12576,7 +12601,7 @@ index 0000000..cd25eb8
 +	 * range of the VM. If this doesn't work, we need change the driver!
 +	 */
 +	if (!(g_value & mask)) {
-+		vgt_dbg("vGT(%d): translate address ZERO for reg (%lx)\n",
++		vgt_dbg(VGT_DBG_MEM, "vGT(%d): translate address ZERO for reg (%lx)\n",
 +			vgt->vgt_id, reg);
 +		g_value = (vgt_guest_visible_gm_base(vgt) & mask) |
 +			  (g_value & ~mask);
@@ -12591,7 +12616,7 @@ index 0000000..cd25eb8
 +	 *  vgt_emulate_write(). Will fix this later.
 +	 */
 +	ASSERT_VM(!ret, vgt);
-+	vgt_dbg("....(g)%x->(h)%llx\n", g_value, (h_value & mask) | (g_value & ~mask));
++	vgt_dbg(VGT_DBG_MEM, "....(g)%x->(h)%llx\n", g_value, (h_value & mask) | (g_value & ~mask));
 +
 +	return (h_value & mask) | (g_value & ~mask);
 +}
@@ -12610,7 +12635,7 @@ index 0000000..cd25eb8
 +	if (!reg_addr_fix(pdev, reg))
 +		return h_value;
 +
-+	vgt_dbg("vGT: address fix h->g for reg (%lx)(%x)\n", reg, h_value);
++	vgt_dbg(VGT_DBG_MEM, "vGT: address fix h->g for reg (%lx)(%x)\n", reg, h_value);
 +	mask = reg_aux_addr_mask(pdev, reg);
 +
 +	/*
@@ -12619,12 +12644,12 @@ index 0000000..cd25eb8
 +	 * doesn't matter.
 +	 */
 +	if (!h_gm_is_valid(vgt, h_value & mask)) {
-+		vgt_dbg("!!!vGT: reg (%lx) doesn't contain a valid host address (%x)\n", reg, h_value);
++		vgt_dbg(VGT_DBG_MEM, "!!!vGT: reg (%lx) doesn't contain a valid host address (%x)\n", reg, h_value);
 +		h_value = (vgt_visible_gm_base(vgt) & mask) | (h_value & ~mask);
 +	}
 +
 +	g_value = h2g_gm(vgt, h_value & mask);
-+	vgt_dbg("....(h)%x->(g)%x\n", h_value, (g_value & mask) | (h_value & ~mask));
++	vgt_dbg(VGT_DBG_MEM, "....(h)%x->(g)%x\n", h_value, (g_value & mask) | (h_value & ~mask));
 +	return (g_value & mask) | (h_value & ~mask);
 +}
 +
@@ -12867,7 +12892,7 @@ index 0000000..cd25eb8
 +}
 diff --git a/drivers/xen/vgt/cfg_space.c b/drivers/xen/vgt/cfg_space.c
 new file mode 100644
-index 0000000..0ab3049
+index 0000000..5b33265
 --- /dev/null
 +++ b/drivers/xen/vgt/cfg_space.c
 @@ -0,0 +1,406 @@
@@ -13149,7 +13174,7 @@ index 0000000..0ab3049
 +					vgt_hvm_set_trap_area(vgt);
 +				}
 +			} else {
-+				vgt_dbg("need to trap the PIO BAR? "
++				vgt_dbg(VGT_DBG_GENERIC, "need to trap the PIO BAR? "
 +					"old_cmd=0x%x, cmd_changed=%0x",
 +					old_cmd, cmd_changed);
 +			}
@@ -13240,7 +13265,7 @@ index 0000000..0ab3049
 +bool vgt_hvm_write_cf8_cfc(struct vgt_device *vgt,
 +	unsigned int port, unsigned int bytes, unsigned long val)
 +{
-+	vgt_dbg("vgt_hvm_write_cf8_cfc %x %d %lx\n", port, bytes, val);
++	vgt_dbg(VGT_DBG_GENERIC, "vgt_hvm_write_cf8_cfc %x %d %lx\n", port, bytes, val);
 +	if ( (port & ~3) == 0xcf8 ) {
 +		ASSERT (bytes == 4);
 +		ASSERT ((port & 3) == 0);
@@ -13273,13 +13298,13 @@ index 0000000..0ab3049
 +					&data, bytes);
 +		memcpy(val, &data, bytes);
 +	}
-+	vgt_dbg("VGT: vgt_cfg_read_emul port %x bytes %x got %lx\n",
++	vgt_dbg(VGT_DBG_GENERIC, "VGT: vgt_cfg_read_emul port %x bytes %x got %lx\n",
 +			port, bytes, *val);
 +	return true;
 +}
 diff --git a/drivers/xen/vgt/cmd_parser.c b/drivers/xen/vgt/cmd_parser.c
 new file mode 100644
-index 0000000..43874c7
+index 0000000..b62facc
 --- /dev/null
 +++ b/drivers/xen/vgt/cmd_parser.c
 @@ -0,0 +1,2264 @@
@@ -13427,7 +13452,7 @@ index 0000000..43874c7
 +		return -ENOSPC;
 +	}
 +
-+	vgt_dbg("VM(%d): Add patch entry-%d (addr: %llx, val: %x, id: %lld\n",
++	vgt_dbg(VGT_DBG_CMD, "VM(%d): Add patch entry-%d (addr: %llx, val: %x, id: %lld\n",
 +		s->vgt->vm_id, next, (uint64_t)addr, val, s->request_id);
 +	patch = &list->patch[next];
 +	patch->addr = addr;
@@ -13527,7 +13552,7 @@ index 0000000..43874c7
 +		if (patch->request_id > submission_id)
 +			break;
 +
-+		vgt_dbg("submission-%lld: apply patch entry-%d (addr: %llx, val: %x->%x, id: %lld\n",
++		vgt_dbg(VGT_DBG_CMD, "submission-%lld: apply patch entry-%d (addr: %llx, val: %x->%x, id: %lld\n",
 +			submission_id, next, (uint64_t)patch->addr,
 +			patch->old_val, patch->new_val, patch->request_id);
 +		apply_patch_entry(patch);
@@ -14179,7 +14204,7 @@ index 0000000..43874c7
 +		(plane == PRIMARY_PLANE) &&
 +		((stride_val & PITCH_MASK) !=
 +			(phys_stride & stride_mask))) {
-+		vgt_dbg("Stride value may not match display timing! "
++		vgt_dbg(VGT_DBG_CMD, "Stride value may not match display timing! "
 +			"MI_DISPLAY_FLIP will be ignored!\n");
 +		return false;
 +	}
@@ -14285,7 +14310,7 @@ index 0000000..43874c7
 +		return 0;
 +	}
 +
-+	vgt_dbg("VM %d: mi_display_flip to be ignored\n",
++	vgt_dbg(VGT_DBG_CMD, "VM %d: mi_display_flip to be ignored\n",
 +		s->vgt->vm_id);
 +
 +	for (i = 1; i < length; i ++) {
@@ -14337,7 +14362,7 @@ index 0000000..43874c7
 +
 +	if (s->vgt != current_foreground_vm(s->vgt->pdev)) {
 +		rc |= add_patch_entry(s, cmd_ptr(s, 0), MI_NOOP);
-+		vgt_dbg("VM %d: mi_wait_for_event to be ignored\n", s->vgt->vm_id);
++		vgt_dbg(VGT_DBG_CMD, "VM %d: mi_wait_for_event to be ignored\n", s->vgt->vm_id);
 +		return rc;
 +	}
 +
@@ -14407,7 +14432,7 @@ index 0000000..43874c7
 +	//entry = v_aperture(s->vgt->pdev, cmd_val(s,1));
 +	entry = cmd_ptr(s, 2);
 +	for (i=0; i<entry_num; i++){
-+		vgt_dbg("vgt: update GTT entry %d\n", i);
++		vgt_dbg(VGT_DBG_CMD, "vgt: update GTT entry %d\n", i);
 +		/*TODO: optimize by batch g2m translation*/
 +		rc = gtt_p2m(s->vgt, entry[i], &entry[i] );
 +		if (rc < 0){
@@ -15292,7 +15317,7 @@ index 0000000..43874c7
 +
 +	for (i=0; i< ARRAY_SIZE(cmd_info); i++){
 +		if (!(cmd_info[i].devices & gen_type)){
-+			vgt_dbg("CMD[%-30s] op[%04x] flag[%x] devs[%02x] rings[%02x] not registered\n",
++			vgt_dbg(VGT_DBG_CMD, "CMD[%-30s] op[%04x] flag[%x] devs[%02x] rings[%02x] not registered\n",
 +					cmd_info[i].name, cmd_info[i].opcode, cmd_info[i].flag,
 +					cmd_info[i].devices, cmd_info[i].rings);
 +			continue;
@@ -15313,7 +15338,7 @@ index 0000000..43874c7
 +
 +		INIT_HLIST_NODE(&e->hlist);
 +		vgt_add_cmd_entry(e);
-+		vgt_dbg("CMD[%-30s] op[%04x] flag[%x] devs[%02x] rings[%02x] registered\n",
++		vgt_dbg(VGT_DBG_CMD, "CMD[%-30s] op[%04x] flag[%x] devs[%02x] rings[%02x] registered\n",
 +				e->info->name,e->info->opcode, e->info->flag, e->info->devices,
 +				e->info->rings);
 +	}
@@ -15381,7 +15406,7 @@ index 0000000..43874c7
 +	 * future for performance considerations.
 +	 */
 +	if (unlikely(cmd_len > VGT_MAX_CMD_LENGTH)) {
-+		vgt_dbg("cmd length exceed tracing limitation!\n");
++		vgt_dbg(VGT_DBG_CMD, "cmd length exceed tracing limitation!\n");
 +		cmd_len = VGT_MAX_CMD_LENGTH;
 +	}
 +	for (i = 0; i < cmd_len; i++)
@@ -15473,7 +15498,7 @@ index 0000000..43874c7
 +		return rc;
 +
 +	klog_printk("ring buffer scan start on ring %d\n", ring_id);
-+	vgt_dbg("scan_start: start=%lx end=%lx\n", gma_head, gma_tail);
++	vgt_dbg(VGT_DBG_CMD, "scan_start: start=%lx end=%lx\n", gma_head, gma_tail);
 +	while(s.ip_gma != gma_tail){
 +		if (s.buf_type == RING_BUFFER_INSTRUCTION){
 +			ASSERT((s.ip_gma >= base) && (s.ip_gma < gma_bottom));
@@ -15498,7 +15523,7 @@ index 0000000..43874c7
 +	}
 +
 +	klog_printk("ring buffer scan end on ring %d\n", ring_id);
-+	vgt_dbg("scan_end\n");
++	vgt_dbg(VGT_DBG_CMD, "scan_end\n");
 +	return rc;
 +}
 +
@@ -15519,7 +15544,7 @@ index 0000000..43874c7
 +
 +	if ( !(vring->ctl & _RING_CTL_ENABLE) ) {
 +		/* Ring is enabled */
-+		vgt_dbg("VGT-Parser.c vring head %x tail %x ctl %x\n",
++		vgt_dbg(VGT_DBG_CMD, "VGT-Parser.c vring head %x tail %x ctl %x\n",
 +			vring->head, vring->tail, vring->ctl);
 +		return 0;
 +	}
@@ -16043,10 +16068,10 @@ index 0000000..0d84c28
 +extern void vgt_cmd_name(uint32_t cmd, int ring_id, int gen);
 diff --git a/drivers/xen/vgt/debugfs.c b/drivers/xen/vgt/debugfs.c
 new file mode 100644
-index 0000000..eab988b
+index 0000000..458bd67
 --- /dev/null
 +++ b/drivers/xen/vgt/debugfs.c
-@@ -0,0 +1,1072 @@
+@@ -0,0 +1,1075 @@
 +/*
 + * Debugfs interfaces
 + *
@@ -16723,8 +16748,6 @@ index 0000000..eab988b
 +				str = "Port C HDMI"; break;
 +			case VGT_HDMI_D:
 +				str = "Port D HDMI"; break;
-+			case VGT_LVDS:
-+				str = "LVDS"; break;
 +			default:
 +				str = "Port INV";
 +		}
@@ -16996,12 +17019,15 @@ index 0000000..eab988b
 +{
 +	int retval,i;
 +	struct array_data *p;
-+	int vgt_id = vgt->vgt_id;
-+	struct pgt_device *pdev = vgt->pdev;
++	int vgt_id;
++	struct pgt_device *pdev;
 +	struct dentry *perf_dir_entry, *cmdstat_dir_entry;
 +
 +	if (!vgt || !d_vgt_debug)
 +		return -EINVAL;
++
++	vgt_id = vgt->vgt_id;
++	pdev = vgt->pdev;
 +
 +	retval = sprintf(vm_dir_name[vgt_id], "vm%d", vgt->vm_id);
 +	if (retval <= 0) {
@@ -17085,6 +17111,8 @@ index 0000000..eab988b
 +		debugfs_create_u64_node ("vring_scan_cycles", 0444, perf_dir_entry, &(vgt->stat.vring_scan_cycles));
 +		debugfs_create_u64_node ("vgt_gp_cnt", 0444, perf_dir_entry, &vgt_gp_cnt);
 +		debugfs_create_u64_node ("vgt_gp_cycles", 0444, perf_dir_entry, &vgt_gp_cycles);
++		debugfs_create_u64_node ("ppgtt_wp_cnt", 0444, perf_dir_entry, &(vgt->stat.ppgtt_wp_cnt));
++		debugfs_create_u64_node ("ppgtt_wp_cycles", 0444, perf_dir_entry, &(vgt->stat.ppgtt_wp_cycles));
 +
 +		/* cmd statistics for ring/batch buffers */
 +		cmdstat_dir_entry = debugfs_create_dir("ring", perf_dir_entry);
@@ -17465,10 +17493,10 @@ index 0000000..d07070d
 +#endif  /* _VGT_DEVTABLE_H */
 diff --git a/drivers/xen/vgt/display.c b/drivers/xen/vgt/display.c
 new file mode 100644
-index 0000000..b56d8ac
+index 0000000..2c937ea
 --- /dev/null
 +++ b/drivers/xen/vgt/display.c
-@@ -0,0 +1,785 @@
+@@ -0,0 +1,988 @@
 +/*
 + * Display context switch
 + *
@@ -17517,7 +17545,7 @@ index 0000000..b56d8ac
 +	unsigned int pipe_ctrl = VGT_MMIO_READ(vgt->pdev, VGT_PIPECONF(pipe));
 +	if (pipe_ctrl & _REGBIT_PIPE_ENABLE) {
 +#endif
-+		vgt_dbg ("start to restore pipe %d.\n", pipe + 1);
++		vgt_dbg (VGT_DBG_DPY, "start to restore pipe %d.\n", pipe + 1);
 +		vgt_restore_sreg(vgt, VGT_DSPCNTR(pipe));
 +		vgt_restore_sreg(vgt, VGT_DSPSTRIDE(pipe));
 +		vgt_restore_sreg(vgt, VGT_DSPSURF(pipe));
@@ -17527,10 +17555,10 @@ index 0000000..b56d8ac
 +		vgt_restore_sreg(vgt, VGT_CURPOS(pipe));
 +		vgt_restore_sreg(vgt, VGT_CURCNTR(pipe));
 +		vgt_restore_sreg(vgt, VGT_CURBASE(pipe));
-+		vgt_dbg ("finished pipe %d restore.\n", pipe + 1);
++		vgt_dbg (VGT_DBG_DPY, "finished pipe %d restore.\n", pipe + 1);
 +#if 0
 +	} else {
-+		vgt_dbg ("pipe %d is not enabled.\n", pipe + 1);
++		vgt_dbg (VGT_DBG_DPY, "pipe %d is not enabled.\n", pipe + 1);
 +	}
 +#endif
 +	return 0;
@@ -17592,7 +17620,7 @@ index 0000000..b56d8ac
 +	struct vgt_device *to_vgt = pdev->next_foreground_vm;
 +	enum vgt_pipe pipe;
 +
-+	vgt_dbg("vGT: doing display switch: from %p to %p\n",
++	vgt_dbg(VGT_DBG_DPY, "vGT: doing display switch: from %p to %p\n",
 +			current_foreground_vm(pdev), to_vgt);
 +
 +	ASSERT(fastpath_dpy_switch);
@@ -17608,64 +17636,37 @@ index 0000000..b56d8ac
 +	current_foreground_vm(pdev) = to_vgt;
 +}
 +
-+static int display_pointer_id = 0;
-+void vgt_set_display_pointer(int vm_id)
-+{
-+	struct vgt_device *vgt = vmid_2_vgt_device(vm_id);
-+
-+	if (!vgt) {
-+		vgt_dbg("vGT: invalid vm_id (%d)\n", vm_id);
-+		return;
-+	}
-+
-+	VGT_MMIO_WRITE(vgt->pdev, _REG_DSPASURF, __sreg(vgt, _REG_DSPASURF));
-+	VGT_MMIO_WRITE(vgt->pdev, _REG_CURABASE, __sreg(vgt, _REG_CURABASE));
-+	vgt_dbg("vGT: set display to VM(%d) with (%x, %x)\n", vm_id,
-+		__sreg(vgt, _REG_DSPASURF), __sreg(vgt, _REG_CURABASE));
-+	display_pointer_id = vm_id;
-+}
-+
-+ssize_t vgt_get_display_pointer(char *buf)
-+{
-+	struct vgt_device *vgt = vmid_2_vgt_device(display_pointer_id);
-+
-+	return sprintf(buf, "Current pointer: id [%d] sReg[%x,%x] pReg[%x,%x]\n",
-+			display_pointer_id,
-+			__sreg(vgt, _REG_DSPASURF), __sreg(vgt, _REG_CURABASE),
-+			VGT_MMIO_READ(vgt->pdev, _REG_DSPASURF),
-+			VGT_MMIO_READ(vgt->pdev, _REG_CURABASE));
-+}
-+
 +static inline int get_event_and_edid_info(vgt_hotplug_cmd_t cmd,
 +				enum vgt_event_type *pevent,
 +				enum vgt_port_type *pedid_idx)
 +{
 +	int ret = 0;
++
 +	switch(cmd.port_sel) {
 +	case 0:
-+		*pedid_idx = VGT_CRT;
++		*pedid_idx = PORT_E;
 +		*pevent = CRT_HOTPLUG;
 +		break;
 +	case 1:
-+		*pedid_idx = VGT_PORT_MAX;
++		*pedid_idx = I915_MAX_PORTS;
 +		*pevent = EVENT_MAX;
 +		printk("vGT: No support for hot plug type: DP_A!\n");
 +		ret = -EINVAL;
 +		break;
 +	case 2:
-+		*pedid_idx = VGT_DP_B;
++		*pedid_idx = PORT_B;
 +		*pevent = DP_B_HOTPLUG;
 +		break;
 +	case 3:
-+		*pedid_idx = VGT_DP_C;
++		*pedid_idx = PORT_C;
 +		*pevent = DP_C_HOTPLUG;
 +		break;
 +	case 4:
-+		*pedid_idx = VGT_DP_D;
++		*pedid_idx = PORT_D;
 +		*pevent = DP_D_HOTPLUG;
 +		break;
 +	default:
-+		*pedid_idx = VGT_PORT_MAX;
++		*pedid_idx = I915_MAX_PORTS;
 +		*pevent = EVENT_MAX;
 +		printk("vGT: Not supported hot plug type: 0x%x!\n",
 +			cmd.port_sel);
@@ -17698,14 +17699,19 @@ index 0000000..b56d8ac
 +				continue;
 +		}
 +
++		if (vgt->vm_id == 0) {
++			continue;
++		}
++
 +		if (hotplug_cmd.action == 0x1) {
 +			/* plug in */
-+			vgt_propagate_edid(vgt, port_idx);
-+			vgt_propagate_dpcd(vgt, port_idx);
++			if (propagate_monitor_to_guest) {
++				vgt_propagate_edid(vgt, port_idx);
++				vgt_propagate_dpcd(vgt, port_idx);
++			}
 +		} else {
 +			/* pull out */
-+			vgt_clear_edid(vgt, port_idx);
-+			vgt_clear_dpcd(vgt, port_idx);
++			vgt_clear_port(vgt, port_idx);
 +		}
 +
 +		vgt_update_monitor_status(vgt);
@@ -17729,21 +17735,29 @@ index 0000000..b56d8ac
 +		return false;
 +}
 +
-+bool vgt_hotplug_uevent_handler(struct vgt_uevent_info *uevent_entry, struct pgt_device *pdev)
++bool vgt_hotplug_uevent_handler(enum vgt_uevent_type event,
++			struct vgt_uevent_info *uevent_entry,
++			struct pgt_device *pdev)
 +{
-+	vgt_probe_dpcd(pdev, -1);
-+	vgt_probe_edid(pdev, -1);
 +	return vgt_default_uevent_handler(uevent_entry, pdev);
 +}
 +
-+static bool vgt_dpy_stat_uevent_handler(struct vgt_uevent_info *uevent_entry,
-+	struct pgt_device *pdev)
++static bool vgt_dpy_stat_uevent_handler(enum vgt_uevent_type event,
++			struct vgt_uevent_info *uevent_entry,
++			struct pgt_device *pdev)
 +{
 +	/* Add vmid */
 +	int retval;
 +	char vmid_str[20];
 +	retval = snprintf(vmid_str, 20, "VMID=%d", uevent_entry->vm_id);
 +	uevent_entry->env_var_table[1] = vmid_str;
++	return vgt_default_uevent_handler(uevent_entry, pdev);
++}
++
++static bool vgt_dpy_detect_uevent_handler(enum vgt_uevent_type event,
++			struct vgt_uevent_info *uevent_entry,
++			struct pgt_device *pdev)
++{
 +	return vgt_default_uevent_handler(uevent_entry, pdev);
 +}
 +
@@ -17778,6 +17792,11 @@ index 0000000..b56d8ac
 +	{"VGT disable VGA mode", -1, KOBJ_ADD, {"VGT_ENABLE_VGA=0", NULL, NULL}, vgt_dpy_stat_uevent_handler},
 +	{"VGT display ready", -1, KOBJ_ADD, {"VGT_DISPLAY_READY=1", NULL, NULL}, vgt_dpy_stat_uevent_handler},
 +	{"VGT display unready", -1, KOBJ_ADD, {"VGT_DISPLAY_READY=0", NULL, NULL}, vgt_dpy_stat_uevent_handler},
++	{"VGT detect PORT A", -1, KOBJ_ADD, {"VGT_DETECT_PORT_A=1", NULL, NULL}, vgt_dpy_detect_uevent_handler},
++	{"VGT detect PORT B", -1, KOBJ_ADD, {"VGT_DETECT_PORT_B=1", NULL, NULL}, vgt_dpy_detect_uevent_handler},
++	{"VGT detect PORT C", -1, KOBJ_ADD, {"VGT_DETECT_PORT_C=1", NULL, NULL}, vgt_dpy_detect_uevent_handler},
++	{"VGT detect PORT D", -1, KOBJ_ADD, {"VGT_DETECT_PORT_D=1", NULL, NULL}, vgt_dpy_detect_uevent_handler},
++	{"VGT detect PORT E", -1, KOBJ_ADD, {"VGT_DETECT_PORT_E=1", NULL, NULL}, vgt_dpy_detect_uevent_handler},
 +};
 +
 +void vgt_set_uevent(struct vgt_device *vgt, enum vgt_uevent_type uevent)
@@ -17806,11 +17825,27 @@ index 0000000..b56d8ac
 +		ASSERT(info_entry);
 +		ASSERT(info_entry->vgt_uevent_handler);
 +
-+		rc = info_entry->vgt_uevent_handler(info_entry, pdev);
++		rc = info_entry->vgt_uevent_handler(bit, info_entry, pdev);
 +		if (rc == false)
 +			printk("%s: %d: vGT: failed to send uevent [%s]!\n",
 +					__func__, __LINE__, info_entry->uevent_name);
 +	}
++}
++
++void vgt_hotplug_udev_notify_func(struct work_struct *work)
++{
++	struct hotplug_work *hpd_work = (struct hotplug_work *)work;
++	struct pgt_device *pdev = container_of(hpd_work, struct pgt_device, hpd_work);
++	int bit;
++
++	mutex_lock(&hpd_work->hpd_mutex);
++	for_each_set_bit(bit, hpd_work->hotplug_uevent, UEVENT_MAX) {
++		struct vgt_uevent_info *info_entry;
++		clear_bit(bit, hpd_work->hotplug_uevent);
++		info_entry = &vgt_default_uevent_info_table[bit];
++		vgt_default_uevent_handler(info_entry, pdev);
++	}
++	mutex_unlock(&hpd_work->hpd_mutex);
 +}
 +
 +void vgt_update_monitor_status(struct vgt_device *vgt)
@@ -17821,22 +17856,22 @@ index 0000000..b56d8ac
 +
 +	if (test_bit(VGT_DP_B, vgt->presented_ports) ||
 +		test_bit(VGT_HDMI_B, vgt->presented_ports)) {
++		vgt_dbg(VGT_DBG_DPY, "enable B port monitor\n");
 +		__vreg(vgt, _REG_SDEISR) |= _REGBIT_DP_B_HOTPLUG;
 +	}
 +	if (test_bit(VGT_DP_C, vgt->presented_ports) ||
 +		test_bit(VGT_HDMI_C, vgt->presented_ports)) {
++		vgt_dbg(VGT_DBG_DPY, "enable C port monitor\n");
 +		__vreg(vgt, _REG_SDEISR) |= _REGBIT_DP_C_HOTPLUG;
 +	}
 +	if (test_bit(VGT_DP_D, vgt->presented_ports) ||
 +		test_bit(VGT_HDMI_D, vgt->presented_ports)) {
++		vgt_dbg(VGT_DBG_DPY, "enable D port monitor\n");
 +		__vreg(vgt, _REG_SDEISR) |= _REGBIT_DP_D_HOTPLUG;
 +	}
-+}
-+
-+
-+static bool is_same_port(vgt_reg_t trans_coder_ctl1, vgt_reg_t trans_coder_ctl2)
-+{
-+	return !(( trans_coder_ctl1 ^ trans_coder_ctl2 ) & _REGBIT_TRANS_DDI_PORT_MASK);
++	if (test_bit(VGT_DP_A, vgt->presented_ports)) {
++		__vreg(vgt, _REG_DDI_BUF_CTL_A) |= _DDI_BUFCTL_DETECT_MASK;
++	}
 +}
 +
 +enum vgt_pipe get_edp_input(uint32_t wr_data)
@@ -17883,6 +17918,12 @@ index 0000000..b56d8ac
 +	return pipe;
 +}
 +
++static void vgt_update_irq_reg(struct vgt_device *vgt)
++{
++	recalculate_and_update_ier(vgt->pdev, _REG_DEIER);
++	recalculate_and_update_imr(vgt->pdev, _REG_DEIMR);
++}
++
 +bool rebuild_pipe_mapping(struct vgt_device *vgt, unsigned int reg, uint32_t new_data, uint32_t old_data)
 +{
 +	vgt_reg_t hw_value;
@@ -17906,7 +17947,8 @@ index 0000000..b56d8ac
 +		}
 +		if (virtual_pipe != I915_MAX_PIPES) {
 +			vgt_set_pipe_mapping(vgt, virtual_pipe, I915_MAX_PIPES);
-+			vgt_dbg("vGT: delete pipe mapping %x\n", virtual_pipe);
++			vgt_update_irq_reg(vgt);
++			vgt_dbg(VGT_DBG_DPY, "vGT: delete pipe mapping %x\n", virtual_pipe);
 +			if (vgt_has_pipe_enabled(vgt, virtual_pipe))
 +				vgt_update_frmcount(vgt, virtual_pipe);
 +			vgt_calculate_frmcount_delta(vgt, virtual_pipe);
@@ -17915,24 +17957,54 @@ index 0000000..b56d8ac
 +	}
 +
 +	/*enable pipe case*/
-+	ASSERT((reg == _REG_TRANS_DDI_FUNC_CTL_EDP) || (new_data &  _REGBIT_TRANS_DDI_PORT_MASK) );
++	ASSERT((reg == _REG_TRANS_DDI_FUNC_CTL_EDP) ||
++			(new_data & _REGBIT_TRANS_DDI_PORT_MASK));
 +
 +	if (reg == _REG_TRANS_DDI_FUNC_CTL_EDP) {
-+		hw_value= VGT_MMIO_READ(vgt->pdev, _REG_TRANS_DDI_FUNC_CTL_EDP);
-+		physical_pipe = get_edp_input(hw_value);
++		// In such case, it is virtual PORT_A mapping to physical PORT_A
++		hw_value = VGT_MMIO_READ(vgt->pdev, _REG_TRANS_DDI_FUNC_CTL_EDP);
++		if (_REGBIT_TRANS_DDI_FUNC_ENABLE & hw_value)
++			physical_pipe = get_edp_input(hw_value);
 +	} else {
-+		for (i = 0; i <= TRANSCODER_C; i++) {
-+			hw_value = VGT_MMIO_READ(vgt->pdev, _VGT_TRANS_DDI_FUNC_CTL(i));
-+			if (is_same_port(new_data,hw_value) && ( _REGBIT_TRANS_DDI_FUNC_ENABLE & hw_value)) {
-+				physical_pipe = i;
-+				break;
++		enum vgt_port vport, vport_override;
++		vport = (new_data & _REGBIT_TRANS_DDI_PORT_MASK) >> _TRANS_DDI_PORT_SHIFT;
++		vport_override = vgt->ports[vport].port_override;
++		if (vport_override == I915_MAX_PORTS) {
++			vgt_warn("Unexpected driver behavior to enable TRANS_DDI"
++					" for not ready port!!\n");
++			physical_pipe = I915_MAX_PIPES;
++		} else if (vport_override == PORT_A) {
++			hw_value = VGT_MMIO_READ(vgt->pdev, _REG_TRANS_DDI_FUNC_CTL_EDP);
++			if (_REGBIT_TRANS_DDI_FUNC_ENABLE & hw_value)
++				physical_pipe = get_edp_input(hw_value);
++								
++		} else {
++			for (i = 0; i <= TRANSCODER_C; i++) {
++				enum vgt_port pport;
++				hw_value = VGT_MMIO_READ(vgt->pdev, _VGT_TRANS_DDI_FUNC_CTL(i));
++				pport = (hw_value & _REGBIT_TRANS_DDI_PORT_MASK) >>
++						_TRANS_DDI_PORT_SHIFT;
++
++				printk("%s: Enable. pport = %d, vport = %d, "
++					"hw_value = 0x%08x, new_data = 0x%08x\n",
++			       		__FUNCTION__, pport, vport, hw_value, new_data);
++
++				if (!(_REGBIT_TRANS_DDI_FUNC_ENABLE & hw_value)) {
++					continue;
++				}
++
++				if (vport_override == pport) {
++					physical_pipe = i;
++					break;
++				}
 +			}
 +		}
 +	}
 +
 +	ASSERT(virtual_pipe != I915_MAX_PIPES);
 +	vgt_set_pipe_mapping(vgt, virtual_pipe, physical_pipe);
-+	vgt_dbg("vGT: add pipe mapping  %x - > %x \n", virtual_pipe, physical_pipe);
++	vgt_dbg(VGT_DBG_DPY, "vGT: add pipe mapping  %x - > %x \n", virtual_pipe, physical_pipe);
++	vgt_update_irq_reg(vgt);
 +	if (vgt_has_pipe_enabled(vgt, virtual_pipe))
 +		vgt_update_frmcount(vgt, virtual_pipe);
 +	vgt_calculate_frmcount_delta(vgt, virtual_pipe);
@@ -17942,7 +18014,6 @@ index 0000000..b56d8ac
 +	}
 +
 +	return true;
-+
 +}
 +
 +bool update_pipe_mapping(struct vgt_device *vgt, unsigned int physical_reg, uint32_t physical_wr_data)
@@ -17951,55 +18022,67 @@ index 0000000..b56d8ac
 +	uint32_t virtual_wr_data;
 +	enum vgt_pipe virtual_pipe = I915_MAX_PIPES;
 +	enum vgt_pipe physical_pipe = I915_MAX_PIPES;
++	enum vgt_port pport;
 +
 +	physical_pipe = get_pipe(physical_reg, physical_wr_data);
 +
 +	/*disable pipe case*/
 +	if ((_REGBIT_TRANS_DDI_FUNC_ENABLE & physical_wr_data) == 0) {
-+		if (physical_reg == _REG_TRANS_DDI_FUNC_CTL_EDP ) {
-+			virtual_pipe = get_edp_input(__vreg(vgt, _REG_TRANS_DDI_FUNC_CTL_EDP));
-+			if (virtual_pipe != I915_MAX_PIPES) {
-+				vgt_set_pipe_mapping(vgt, virtual_pipe, I915_MAX_PIPES);
-+				if (vgt_has_pipe_enabled(vgt, virtual_pipe))
-+					vgt_update_frmcount(vgt, virtual_pipe);
-+				vgt_calculate_frmcount_delta(vgt, virtual_pipe);
-+			}
-+		} else {
-+			for (i = 0; i < I915_MAX_PIPES; i ++) {
-+				if(vgt->pipe_mapping[i] == physical_pipe) {
-+					vgt_set_pipe_mapping(vgt, i, I915_MAX_PIPES);
-+					vgt_dbg("vGT: Update mapping: delete pipe %x  \n", i);
-+					if (vgt_has_pipe_enabled(vgt, i))
-+						vgt_update_frmcount(vgt, i);
-+					vgt_calculate_frmcount_delta(vgt, i);
-+				}
++		for (i = 0; i < I915_MAX_PIPES; i ++) {
++			if(vgt->pipe_mapping[i] == physical_pipe) {
++				vgt_set_pipe_mapping(vgt, i, I915_MAX_PIPES);
++				vgt_dbg(VGT_DBG_DPY, "vGT: Update mapping: delete pipe %x  \n", i);
++				if (vgt_has_pipe_enabled(vgt, i))
++					vgt_update_frmcount(vgt, i);
++				vgt_calculate_frmcount_delta(vgt, i);
 +			}
 +		}
++		vgt_update_irq_reg(vgt);
 +		return true;
 +	}
 +
 +	/*enable case*/
 +	if (physical_reg == _REG_TRANS_DDI_FUNC_CTL_EDP) {
-+		virtual_pipe = get_edp_input(__vreg(vgt, _REG_TRANS_DDI_FUNC_CTL_EDP));
++		pport = PORT_A;
++		if (vgt->ports[PORT_A].port_override == PORT_A) {
++			virtual_pipe = get_edp_input(__vreg(vgt, _REG_TRANS_DDI_FUNC_CTL_EDP));
++		}
 +	} else {
-+		for (i = 0; i <= TRANSCODER_C; i++) {
-+			virtual_wr_data = __vreg(vgt, _VGT_TRANS_DDI_FUNC_CTL(i));
-+			if (is_same_port(virtual_wr_data,physical_wr_data) &&
-+				(_REGBIT_TRANS_DDI_FUNC_ENABLE & virtual_wr_data ) ) {
-+				virtual_pipe = i;
-+				break;
-+			}
++		pport = (physical_wr_data & _REGBIT_TRANS_DDI_PORT_MASK) >> _TRANS_DDI_PORT_SHIFT;
++	}
++
++	for (i = 0; i <= TRANSCODER_C; i++) {
++		enum vgt_port vport, vport_override;
++		virtual_wr_data = __vreg(vgt, _VGT_TRANS_DDI_FUNC_CTL(i));
++		vport = (virtual_wr_data & _REGBIT_TRANS_DDI_PORT_MASK) >>
++				_TRANS_DDI_PORT_SHIFT;
++		vport_override = vgt->ports[vport].port_override;
++
++		printk("%s: Enable. pport = %d, vport = %d\n", __FUNCTION__, pport, vport);
++
++		if (!(_REGBIT_TRANS_DDI_FUNC_ENABLE & virtual_wr_data) ||
++			(vport_override == I915_MAX_PORTS)) {
++			continue;
++		}
++
++		if (vport_override == pport) {
++			virtual_pipe = i;
++			break;
 +		}
 +	}
 +
 +	if (virtual_pipe != I915_MAX_PIPES) {
 +		vgt_set_pipe_mapping(vgt, virtual_pipe, physical_pipe);
-+		vgt_dbg("vGT: Update pipe mapping  %x - > %x \n", virtual_pipe, physical_pipe);
++		vgt_dbg(VGT_DBG_DPY, "vGT: Update pipe mapping  %x - > %x \n", virtual_pipe, physical_pipe);
++		vgt_update_irq_reg(vgt);
 +		if (vgt_has_pipe_enabled(vgt, virtual_pipe))
 +			vgt_update_frmcount(vgt, virtual_pipe);
 +		vgt_calculate_frmcount_delta(vgt, virtual_pipe);
 +	}
-+	if (current_foreground_vm(vgt->pdev) == vgt && virtual_pipe != I915_MAX_PIPES) {
++
++	if (current_foreground_vm(vgt->pdev) == vgt &&
++		virtual_pipe != I915_MAX_PIPES &&
++		(_PRI_PLANE_ENABLE & VGT_MMIO_READ(vgt->pdev, VGT_DSPCNTR(physical_pipe)))) {
 +		vgt_restore_state(vgt, virtual_pipe);
 +	}
 +
@@ -18034,11 +18117,17 @@ index 0000000..b56d8ac
 +	}
 +
 +	if (real_pipe == I915_MAX_PIPES) {
-+		vgt_dbg("try to set panel fitting before pipe is mapped!\n");
++		vgt_dbg(VGT_DBG_DPY, "try to set panel fitting before pipe is mapped!\n");
++		return false;
++	}
++	if (((_PRI_PLANE_ENABLE & __vreg(vgt, VGT_DSPCNTR(pipe))) == 0) ||
++		(_PRI_PLANE_ENABLE & VGT_MMIO_READ(vgt->pdev, VGT_DSPCNTR(real_pipe))) == 0) {
 +		return false;
 +	}
 +	src_width = (__vreg(vgt, VGT_PIPESRC(pipe)) & 0xffff0000) >> 16;
 +	src_height = __vreg(vgt, VGT_PIPESRC(pipe)) & 0xffff;
++	ASSERT_VM(src_width != 0, vgt);
++	ASSERT_VM(src_height != 0, vgt);
 +	src_width += 1;
 +	src_height += 1;
 +
@@ -18056,6 +18145,8 @@ index 0000000..b56d8ac
 +	target_width = VGT_MMIO_READ(vgt->pdev, h_total_reg) & 0xffff;
 +	target_height = VGT_MMIO_READ(vgt->pdev, v_total_reg) & 0xffff;
 +
++	ASSERT_VM(target_width != 0, vgt);
++	ASSERT_VM(target_height != 0, vgt);
 +	target_width += 1;
 +	target_height += 1;
 +
@@ -18065,11 +18156,11 @@ index 0000000..b56d8ac
 +
 +	/*enable panel fitting only when the source mode does not eqaul to the target mode*/
 +	if (src_width != target_width || src_height != target_height ) {
-+		vgt_dbg("enable panel fitting for pipe %d, src_width:%d, src_height: %d, tgt_width:%d, tgt_height:%d!\n",
-+			pipe,src_width,src_height ,target_width,target_height);
++		vgt_dbg(VGT_DBG_DPY, "enable panel fitting for VM %d, pipe %d, src_width:%d, src_height: %d, tgt_width:%d, tgt_height:%d!\n",
++			vgt->vm_id, real_pipe, src_width, src_height, target_width, target_height);
 +		pf_ctl = pf_ctl | _REGBIT_PF_ENABLE;
 +	} else {
-+		vgt_dbg("disable panel fitting for pipe %d!\n", pipe);
++		vgt_dbg(VGT_DBG_DPY, "disable panel fitting for VM %d, for pipe %d!\n", vgt->vm_id, real_pipe);
 +	}
 +
 +	/* we need to increase Water Mark in down scaling case */
@@ -18254,12 +18345,152 @@ index 0000000..b56d8ac
 +		}
 +	}
 +}
++
++#define DPCD_HEADER_SIZE	0xb
++
++u8 dpcd_fix_data[DPCD_HEADER_SIZE] = {
++	0x11, 0x0a, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
++};
++
++static bool is_dp_port_type(enum vgt_port_type port_type)
++{
++	if (port_type == VGT_DP_A ||
++		port_type == VGT_DP_B ||
++		port_type == VGT_DP_C ||
++		port_type == VGT_DP_D) {
++		return true;
++	}
++	return false;
++}
++
++
++/* copy the cached value into corresponding port field. Meanwhile,
++ * Update system monitor state for EDID changes
++ */
++void vgt_flush_port_info(struct vgt_device *vgt, struct gt_port *port)
++{
++	int port_idx;
++	enum vgt_port_type legacy_porttype;
++	int i;
++	unsigned int reg_ddi[4] ={
++		_REG_TRANS_DDI_FUNC_CTL_A,
++		_REG_TRANS_DDI_FUNC_CTL_B,
++		_REG_TRANS_DDI_FUNC_CTL_C,
++		_REG_TRANS_DDI_FUNC_CTL_EDP,
++	};
++
++
++	if (!vgt || !port)
++		return;
++	if (!port->cache.valid) {
++		vgt_warn("port cache flush with invalid data. "
++				"Will be ignored!\n");
++		return;
++	}
++
++	port_idx = vgt_get_port(vgt, port);
++
++	if (port_idx == I915_MAX_PORTS) {
++		vgt_err ("VM-%d: port is not a valid pointer", vgt->vm_id);
++		goto finish_flush;
++	} 
++
++	legacy_porttype = port->cache.type;
++
++	if (legacy_porttype == VGT_PORT_MAX) {
++		if (port_idx == PORT_E)
++			legacy_porttype = VGT_CRT;
++		else if (port->dpcd && port->dpcd->data_valid)
++			legacy_porttype = VGT_DP_B + port_idx - 1;
++		else
++			legacy_porttype = VGT_HDMI_B + port_idx - 1;
++	}
++
++	if (port->edid == NULL) {
++		port->edid = kmalloc(sizeof(vgt_edid_data_t), GFP_ATOMIC);
++	}
++	if (port->edid == NULL) {
++		vgt_err("Memory allocation fail for EDID block!\n");
++		return;
++	}
++
++	if (!(port->cache.edid && port->cache.edid->data_valid)) {
++		port->edid->data_valid = false;
++		if (port->dpcd)
++			port->dpcd->data_valid = false;
++		port->type = VGT_PORT_MAX;
++		port->port_override = I915_MAX_PORTS;
++		clear_bit(legacy_porttype, vgt->presented_ports);
++	} else {
++		memcpy(port->edid->edid_block,
++			port->cache.edid->edid_block, EDID_SIZE);
++		port->edid->data_valid = true;
++		port->type = legacy_porttype;
++		port->port_override = port->cache.port_override;
++		if (vgt_debug & VGT_DBG_DPY) {
++			vgt_info("Monitor detection:new monitor detected on %s\n", VGT_PORT_NAME(port->physcal_port));
++			vgt_print_edid(port->edid);
++		}
++
++		if (is_dp_port_type(port->type)) {
++			if (port->dpcd == NULL) {
++				port->dpcd = kmalloc(sizeof(struct vgt_dpcd_data),
++				GFP_ATOMIC);
++			}
++
++			if (port->dpcd == NULL) {
++				return;
++			}
++			memset(port->dpcd->data, 0, DPCD_SIZE);
++			memcpy(port->dpcd->data, dpcd_fix_data, DPCD_HEADER_SIZE);
++			port->dpcd->data_valid = true;
++			if (vgt_debug & VGT_DBG_DPY) {
++				vgt_info("Monitor detection:assign fixed dpcd to port %s\n", VGT_PORT_NAME(port->physcal_port));
++			}
++		}
++		
++		set_bit(legacy_porttype, vgt->presented_ports);
++		for (i = 0; i <= 3; i++) {
++			unsigned int ddi_value;
++			ddi_value = VGT_MMIO_READ(vgt->pdev, reg_ddi[i]);
++			if (_REGBIT_TRANS_DDI_FUNC_ENABLE & ddi_value) {
++				update_pipe_mapping(vgt, reg_ddi[i], ddi_value);
++			}
++		}
++	}
++	vgt_update_monitor_status(vgt);
++
++finish_flush:
++	port->cache.valid = false;
++	port->cache.type = VGT_PORT_MAX;
++}
++
++/*send uevent to user space to do display detection*/
++void vgt_detect_display(struct vgt_device *vgt, int index)
++{
++	struct pgt_device *pdev = vgt->pdev;
++	int i;
++	enum vgt_uevent_type uevent;
++
++	if (index == -1) { /* -1 index means "ALL" */
++		for (i = 0; i < I915_MAX_PORTS; i++) {
++			vgt_detect_display(vgt, i);
++		}
++		return;
++	}
++
++	uevent = VGT_DETECT_PORT_A + index;
++
++	vgt_set_uevent(vgt, uevent);
++	vgt_raise_request(pdev, VGT_REQUEST_UEVENT);
++}
++
 diff --git a/drivers/xen/vgt/edid.c b/drivers/xen/vgt/edid.c
 new file mode 100644
-index 0000000..7e2b9ae
+index 0000000..a1adfe0
 --- /dev/null
 +++ b/drivers/xen/vgt/edid.c
-@@ -0,0 +1,1370 @@
+@@ -0,0 +1,1454 @@
 +/*
 + * vGT EDID virtualization module
 + *
@@ -18307,8 +18538,7 @@ index 0000000..7e2b9ae
 +	"DP_D",
 +	"HDMI_B",
 +	"HDMI_C",
-+	"HDMI_D",
-+	"LVDS"
++	"HDMI_D"
 +};
 +
 +#define EDID_LOG(log, emu, fmt, args...)			\
@@ -18577,10 +18807,66 @@ index 0000000..7e2b9ae
 +	return false;
 +}
 +
-+void vgt_probe_edid(struct pgt_device *pdev, int index)
++static const u8 edid_header[] = {
++	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00
++};
++
++int vgt_edid_header_is_valid(const u8 *raw_edid)
++{
++	int i, score = 0;
++	for (i = 0; i < sizeof(edid_header); i++)
++		if (raw_edid[i] == edid_header[i])
++			score++;
++	return score;
++}
++
++bool vgt_is_edid_valid(u8 *raw_edid)
++{
++	bool is_valid = false;
++	int score, i;
++	u8 check_sum = 0;
++
++	score = vgt_edid_header_is_valid(raw_edid);
++
++	check_sum = 0;
++	for (i = 0; i < EDID_SIZE; ++i) {
++		check_sum += raw_edid[i];
++	}
++	if (check_sum) {
++		vgt_err("EDID check sum is invalid\n");
++	}
++
++	if ((score == 8) && (check_sum == 0)) {
++		is_valid = true;
++	}
++	return is_valid;
++}
++
++static inline void vgt_clear_edid(struct gt_port *port)
++{
++	if (port && port->edid && port->edid->data_valid) {
++		port->edid->data_valid = false;
++	}
++}
++
++static inline void vgt_clear_dpcd(struct gt_port *port)
++{
++	if (port && port->dpcd && port->dpcd->data_valid) {
++		port->dpcd->data_valid = false;
++	}
++}
++
++static inline bool vgt_port_pluggable(int i)
++{
++	return (i != VGT_DP_A);
++}
++
++void vgt_probe_edid(struct pgt_device *pdev, int index, bool init)
 +{
 +	int i, ret;
 +	struct drm_device *drm_dev = pci_get_drvdata(pdev->pdev);
++	u8 check_sum = 0;
++	u8 *raw_edid;
 +
 +	if (drm_dev)
 +		mutex_lock(&drm_dev->mode_config.mutex);
@@ -18590,18 +18876,18 @@ index 0000000..7e2b9ae
 +	for (i = 0; i < VGT_PORT_MAX; ++ i) {
 +		int gmbus_port = 0;
 +		unsigned int aux_ch_addr = 0;
-+		vgt_edid_data_t **pedid = &(pdev->pdev_edids[i]);
++		int port_id = port_type_to_port(i);
++		vgt_edid_data_t *new_edid = NULL;
 +
-+		if (!vgt_port_equivalent(i, index)) {
++		if (!init) {
++			if (!vgt_port_pluggable(i) ||
++				!vgt_port_equivalent(i, index))
 +			continue;
 +		}
 +
 +		switch (i) {
 +		case VGT_CRT:
 +			gmbus_port = 2;
-+			break;
-+		case VGT_LVDS:
-+			gmbus_port = 3;
 +			break;
 +		case VGT_HDMI_C:
 +			if (!test_bit(VGT_DP_C, pdev->detected_ports))
@@ -18637,35 +18923,31 @@ index 0000000..7e2b9ae
 +		}
 +
 +		if (gmbus_port || aux_ch_addr) {
-+			if (!*pedid) {
-+				/* Do not use GFP_KERNEL in any interrupt or
-+				 * atomic context (e.g. Do not hold a spin_lock
-+				 * ,this should be guaranteed by the caller).
-+				 */
-+				BUG_ON(in_interrupt());
-+				*pedid = kmalloc(sizeof(vgt_edid_data_t), GFP_KERNEL);
++			vgt_edid_data_t **pedid = &(pdev->ports[port_id].edid);
++			/* Do not use GFP_KERNEL in any interrupt or
++			 * atomic context (e.g. Do not hold a spin_lock
++			 * ,this should be guaranteed by the caller).
++			 */
++			BUG_ON(in_interrupt());
++			if (*pedid == NULL) {
++				*pedid = kmalloc(sizeof(vgt_edid_data_t),
++						GFP_KERNEL);
++			}
 +
-+				if (*pedid == NULL) {
-+					vgt_err("ERROR: Insufficient memory in %s\n",
-+							__FUNCTION__);
-+					BUG();
-+				}
++			if (*pedid == NULL) {
++				vgt_err("Insufficient memory!\n");
++				BUG();
 +			}
-+		} else {
-+			if (*pedid) {
-+				vgt_info("EDID_PROBE: Free edid memory.\n");
-+				kfree(*pedid);
-+				*pedid = NULL;
-+			}
++			new_edid = *pedid;
++			vgt_clear_edid(&pdev->ports[port_id]);
 +		}
 +
 +		if (gmbus_port) {
 +			ret = vgt_get_phys_edid_from_gmbus(pdev,
-+					(*pedid)->edid_block, EDID_ADDR,
++					new_edid->edid_block, EDID_ADDR,
 +					EDID_SIZE, gmbus_port);
-+			if (ret) {
-+				kfree(*pedid);
-+				*pedid = NULL;
++			if (ret == 0) {
++				new_edid->data_valid = true;
 +			}
 +		}
 +
@@ -18677,7 +18959,7 @@ index 0000000..7e2b9ae
 +			msg[0] = (VGT_AUX_I2C_WRITE | VGT_AUX_I2C_MOT) << 4;
 +			msg[1] = 0;
 +			msg[2] = EDID_ADDR;
-+			msg[3] = 1;
++			msg[3] = 0;
 +			msg[4] = 0;
 +
 +			/* start */
@@ -18691,50 +18973,62 @@ index 0000000..7e2b9ae
 +			vgt_aux_ch_transaction(pdev, aux_ch_addr, msg, 3);
 +
 +			/* read */
-+			msg[1] = 0;
-+			msg[2] = EDID_ADDR;
-+			msg[3] = 0;
 +
 +			for (length = 0; length < EDID_SIZE; length ++) {
 +				value = vgt_aux_ch_transaction(pdev, aux_ch_addr, msg, 4);
-+				(*pedid)->edid_block[length] = ((value) & 0xff0000) >> 16;
++				new_edid->edid_block[length] = ((value) & 0xff0000) >> 16;
 +			}
 +
 +			/* stop reading */
 +			msg[0] = (VGT_AUX_I2C_READ) << 4;
 +			vgt_aux_ch_transaction(pdev, aux_ch_addr, msg, 3);
++
++			new_edid->data_valid = true;
 +		}
 +
-+		if (*pedid) {
++		if (new_edid && new_edid->data_valid) {
++			int score, j;
++			score = vgt_edid_header_is_valid(new_edid->edid_block);
++			if (score < 8 && score >= 6) {
++				vgt_warn("Fixing EDID header, your hardware may be failing\n");
++				memcpy(new_edid->edid_block, edid_header, sizeof(edid_header));
++			}
++			check_sum = 0;
++			raw_edid = new_edid->edid_block;
++			for (j = 0; j < EDID_SIZE; ++ j) {
++				check_sum += raw_edid[j];
++			}
++			if(check_sum) {
++				vgt_err("EDID check sum is invalid\n");
++			}
++
++			if ((score < 6) || (check_sum != 0)) {
++				vgt_err("Reading wrong EDID header! EDID will be ignored on port: %s\n",
++					VGT_PORT_NAME(port_id));
++				new_edid->data_valid = false;
++			}
++		}
++
++		if (new_edid && new_edid->data_valid) {
 +			set_bit(i, pdev->detected_ports);
-+			(*pedid)->data_valid = true;
-+			if (vgt_debug) {
-+				int i;
-+				unsigned char *block = (*pedid)->edid_block;
-+				printk("EDID_PROBE: EDID is:\n");
-+				for (i = 0; i < EDID_SIZE; ++ i) {
-+					if ((block[i] >= 'a' && block[i] <= 'z') ||
-+					    (block[i] >= 'A' && block[i] <= 'Z')) {
-+						printk ("%c ", block[i]);
-+					} else {
-+						printk ("0x%x ", block[i]);
-+					}
-+					if (((i + 1) & 0xf) == 0) {
-+						printk ("\n");
-+					}
-+				}
++			pdev->ports[port_id].type = i;
++			if (vgt_debug & VGT_DBG_DPY) {
++				vgt_info("EDID_PROBE: EDID[%s] is:\n",
++					vgt_port_name[i]);
++				vgt_print_edid(new_edid);
 +			}
 +
 +			/* Check the extension */
-+			if ((*pedid)->edid_block[0x7e]) {
++			if (new_edid->edid_block[0x7e]) {
 +				/* Disable the extension whilst
 +				 * keep the checksum
 +				 */
-+				u8 *block = (*pedid)->edid_block;
++				u8 *block = new_edid->edid_block;
 +				block[0x7f] += block[0x7e];
 +				block[0x7e] = 0;
 +			}
-+			vgt_info("EDID_PROBE: %s\tis detected.\n", vgt_port_name[i]);
++			vgt_info("EDID_PROBE: %s\tis detected, on Port %s\n",
++					vgt_port_name[i], VGT_PORT_NAME(port_id));
 +		} else {
 +			clear_bit(i, pdev->detected_ports);
 +			vgt_info("EDID_PROBE: %s\tis not detected\n", vgt_port_name[i]);
@@ -18748,7 +19042,7 @@ index 0000000..7e2b9ae
 +/*
 + * Get physical DPCD data from DP. DP is specified by index parameter.
 + */
-+void vgt_probe_dpcd(struct pgt_device *pdev, int index)
++void vgt_probe_dpcd(struct pgt_device *pdev, int index, bool init)
 +{
 +	int i;
 +	struct drm_device *drm_dev = pci_get_drvdata(pdev->pdev);
@@ -18759,10 +19053,13 @@ index 0000000..7e2b9ae
 +	for (i = 0; i < DPCD_MAX; i++) {
 +		unsigned int aux_ch_addr = 0;
 +		enum vgt_port_type dp_port = 0;
-+		struct vgt_dpcd_data **dpcd = &(pdev->pdev_dpcds[i]);
++		struct vgt_dpcd_data **dpcd = &(pdev->ports[i + PORT_A].dpcd);
 +
-+		if (!vgt_port_equivalent(i, index))
++		if (!init) {
++			if (!vgt_port_pluggable(i) ||
++				!vgt_port_equivalent(i, index))
 +			continue;
++		}
 +
 +		switch (i) {
 +		case DPCD_DPA:
@@ -18791,9 +19088,13 @@ index 0000000..7e2b9ae
 +			break;
 +		default:
 +			vgt_err("DPCD_PROBE: invalid DP number.\n");
++			BUG();
 +			break;
 +
 +		}
++
++		ASSERT(dp_port >= VGT_DP_A && dp_port <= VGT_DP_D);
++		clear_bit(dp_port, pdev->detected_ports);
 +
 +		if (aux_ch_addr) {
 +			unsigned char msg[4];
@@ -18824,24 +19125,30 @@ index 0000000..7e2b9ae
 +				if (!(*dpcd)->data[DPCD_REV])
 +					break;
 +			}
-+		}
 +
-+		ASSERT(dp_port >= VGT_DP_A && dp_port <= VGT_DP_D);
-+
-+		if (*dpcd) {
 +			if (!(*dpcd)->data[DPCD_REV]) {
 +				(*dpcd)->data_valid = false;
 +				clear_bit(dp_port, pdev->detected_ports);
 +			} else {
++				u32 lane_count;
 +				(*dpcd)->data_valid = true;
++
++				/*temp workaround*/
++				if ((*dpcd)->data[DPCD_MAX_LINK_RATE] != 0x6 && (*dpcd)->data[DPCD_MAX_LINK_RATE] != 0xa) {
++					(*dpcd)->data[DPCD_MAX_LINK_RATE] = 0xa;
++				}
++				lane_count = (*dpcd)->data[DPCD_MAX_LANE_COUNT];
++				if (lane_count != 0x1 && lane_count != 0x2 && lane_count != 0x4) {
++					(*dpcd)->data[DPCD_MAX_LANE_COUNT] = 0x4;
++				}
++
 +				set_bit(dp_port, pdev->detected_ports);
-+				if (vgt_debug) {
++				pdev->ports[i + PORT_A].type = dp_port;
++				if (vgt_debug & VGT_DBG_DPY) {
 +					vgt_info("DPCD_PROBE: DPCD is:\n");
 +					vgt_print_dpcd(*dpcd);
 +				}
 +			}
-+		} else {
-+			clear_bit(dp_port, pdev->detected_ports);
 +		}
 +	}
 +
@@ -18862,133 +19169,140 @@ index 0000000..7e2b9ae
 + */
 +void vgt_propagate_edid(struct vgt_device *vgt, int index)
 +{
++	struct gt_port *port;
++	vgt_edid_data_t *edid;
++	enum vgt_port_type type;
 +	int i;
 +
-+	for (i = 0; i < VGT_PORT_MAX; ++ i) {
-+		vgt_edid_data_t	*edid = vgt->pdev->pdev_edids[i];
-+
-+		if (!vgt_port_equivalent(i, index)) {
-+			continue;
++	if (index == -1) { /* -1 index means "ALL" */
++		for (i = 0; i < I915_MAX_PORTS; i++) {
++			vgt_propagate_edid(vgt, i);
 +		}
-+
-+		if (!edid) {
-+			if (vgt->vgt_edids[i]) {
-+				printk ("EDID_PROPAGATE: Clear EDID %s\n", vgt_port_name[i]);
-+				clear_bit(i, vgt->presented_ports);
-+			}
-+		} else {
-+			printk ("EDID_PROPAGATE: Propagate EDID %s\n", vgt_port_name[i]);
-+			if (!vgt->vgt_edids[i]) {
-+				BUG_ON(in_interrupt());
-+				vgt->vgt_edids[i] = kmalloc(
-+						sizeof(vgt_edid_data_t), GFP_ATOMIC);
-+				if (vgt->vgt_edids[i] == NULL) {
-+					printk("ERROR: Insufficient memory in %s\n",
-+							__FUNCTION__);
-+					BUG();
-+					return;
-+				}
-+			}
-+
-+			memcpy(vgt->vgt_edids[i], edid,
-+				sizeof(vgt_edid_data_t));
-+
-+			if (vgt->vgt_edids[i]->data_valid)
-+				set_bit(i, vgt->presented_ports);
-+			else
-+				clear_bit(i, vgt->presented_ports);
-+
-+			if (vgt_debug && vgt->vgt_edids[i]->data_valid) {
-+				int j;
-+				unsigned char *block = vgt->vgt_edids[i]->edid_block;
-+				printk("EDID_PROPAGATE: EDID[%s] is:\n", vgt_port_name[i]);
-+				for (j = 0; j < EDID_SIZE; ++ j) {
-+					if ((block[j] >= 'a' && block[j] <= 'z') ||
-+						(block[j] >= 'A' && block[j] <= 'Z')) {
-+						printk ("%c ", block[j]);
-+					} else {
-+						printk ("0x%x ", block[j]);
-+					}
-+					if (((j + 1) & 0xf) == 0) {
-+						printk ("\n");
-+					}
-+				}
-+			}
-+		}
++		return;
 +	}
-+}
 +
-+void vgt_clear_edid(struct vgt_device *vgt, int index)
-+{
-+	int i;
++	if (index < 0 || index >= I915_MAX_PORTS) {
++		vgt_warn("Wrong port index input! Will do nothing!\n");
++		return;
++	}
 +
-+	for (i = 0; i < VGT_PORT_MAX; ++ i) {
-+		if (vgt_port_equivalent(i, index)) {
-+			if (vgt->vgt_edids[i]) {
-+				printk("EDID_CLEAR: Clear EDID[%s] of VM%d\n",
-+					vgt_port_name[i], vgt->vm_id);
-+				vgt->vgt_edids[i]->data_valid = false;
-+				clear_bit(i, vgt->presented_ports);
++	port = &vgt->ports[index];
++	if (port->type >= 0 && port->type < VGT_PORT_MAX)
++		clear_bit(vgt->ports[index].type, vgt->presented_ports);
++	vgt_clear_edid(port);
++
++	edid = vgt->pdev->ports[index].edid;
++	type = vgt->pdev->ports[index].type;
++
++	if (edid && edid->data_valid) {
++
++		vgt_info ("EDID_PROPAGATE: Propagate %s EDID[%s] for vm %d\n",
++			VGT_PORT_NAME(index), vgt_port_name[type], vgt->vm_id);
++
++		if (!port->edid) {
++			BUG_ON(in_interrupt());
++			port->edid = kmalloc(sizeof(vgt_edid_data_t), GFP_ATOMIC);
++			if (port->edid == NULL) {
++				vgt_err("Insufficient memory!\n");
++				BUG();
++				return;
 +			}
 +		}
++
++		memcpy(port->edid, edid, sizeof(vgt_edid_data_t));
++		port->type = type;
++		port->port_override = index;
++		set_bit(type, vgt->presented_ports);
++
++		if (vgt_debug & VGT_DBG_DPY) {
++			vgt_info("EDID_PROPAGATE: %s EDID[%s] is:\n",
++				VGT_PORT_NAME(index),
++				vgt_port_name[type]);
++			vgt_print_edid(edid);
++		}
++	} else {
++		vgt_info ("EDID_PROPAGATE: Clear %s for vm %d\n",
++					VGT_PORT_NAME(index), vgt->vm_id);
 +	}
 +}
 +
 +void vgt_propagate_dpcd(struct vgt_device *vgt, int index)
 +{
++	struct vgt_dpcd_data *dpcd = NULL;
 +	int i;
 +
-+	for (i = 0; i < DPCD_MAX; ++i) {
-+		struct vgt_dpcd_data *dpcd = vgt->pdev->pdev_dpcds[i];
++	if (index == -1) { /* -1 index means "ALL" */
++		for (i = 0; i < I915_MAX_PORTS; i++) {
++			vgt_propagate_dpcd(vgt, i);
++		}
++		return;
++	}
 +
-+		if (!vgt_port_equivalent(VGT_DP_A + i, index))
-+			continue;
++	if (index < 0 || index >= I915_MAX_PORTS) {
++		vgt_warn("Wrong port index input! Will do nothing!\n");
++		return;
++	}
 +
-+		if (!dpcd) {
-+			vgt_info("DPCD_PROPAGATE: Clear DPCD %d\n", i);
-+			if (vgt->vgt_dpcds[i]) {
-+				vgt->vgt_dpcds[i]->data_valid = false;
++	/* Assumption: Port is DP if it has DPCD */
++	if (vgt->pdev->ports[index].dpcd && vgt->pdev->ports[index].dpcd->data_valid) {
++		dpcd = vgt->pdev->ports[index].dpcd;
++	}
++
++	vgt_clear_dpcd(&vgt->ports[index]);
++
++	if (dpcd) {
++		vgt_info("DPCD_PROPAGATE: Propagate DPCD %d\n", index);
++		if (!vgt->ports[index].dpcd) {
++			vgt->ports[index].dpcd = kmalloc(
++				sizeof(struct vgt_dpcd_data), GFP_ATOMIC);
++			if (vgt->ports[index].dpcd == NULL) {
++				vgt_err("Insufficient memory!\n");
++				BUG();
++				return;
 +			}
-+		} else {
-+			vgt_info("DPCD_PROPAGATE: Propagate DPCD %d\n", i);
-+			if (!vgt->vgt_dpcds[i]) {
-+				vgt->vgt_dpcds[i] = kmalloc(
-+					sizeof(struct vgt_dpcd_data), GFP_ATOMIC);
-+				if (vgt->vgt_dpcds[i] == NULL) {
-+					vgt_err("Insufficient memory\n");
-+					BUG();
-+					return;
-+				}
-+			}
++		}
 +
-+			memcpy(vgt->vgt_dpcds[i], dpcd,
-+				sizeof(struct vgt_dpcd_data));
++		memcpy(vgt->ports[index].dpcd, dpcd,
++			sizeof(struct vgt_dpcd_data));
 +
-+			/* mask off CP */
-+			vgt->vgt_dpcds[i]->data[DPCD_SINK_COUNT] &=
-+				~DPCD_CP_READY_MASK;
++		/* mask off CP */
++		vgt->ports[index].dpcd->data[DPCD_SINK_COUNT] &=
++			~DPCD_CP_READY_MASK;
 +
-+			if (vgt_debug && vgt->vgt_dpcds[i]->data_valid) {
-+				vgt_info("DPCD_PROPAGATE: DPCD[%d] is:\n", i);
-+				vgt_print_dpcd(vgt->vgt_dpcds[i]);
-+			}
++		if ((vgt_debug & VGT_DBG_DPY) && vgt->ports[index].dpcd->data_valid) {
++			vgt_info("DPCD_PROPAGATE: DPCD[%d] is:\n", index);
++			vgt_print_dpcd(vgt->ports[index].dpcd);
 +		}
 +	}
 +}
 +
-+void vgt_clear_dpcd(struct vgt_device *vgt, int index)
++void vgt_clear_port(struct vgt_device *vgt, int index)
 +{
 +	int i;
++	struct gt_port *port;
 +
-+	for (i = 0; i < DPCD_MAX; ++i) {
-+		if (vgt_port_equivalent(VGT_DP_A + i, index)) {
-+			if (vgt->vgt_dpcds[i]) {
-+				vgt_dbg("DPCD clear: Clear DPCD[0x%x] of VM%d\n",
-+					i, vgt->vm_id);
-+				vgt->vgt_dpcds[i]->data_valid = false;
-+			}
++	if (index == -1) { /* -1 index means "ALL" */
++		for (i = 0; i < I915_MAX_PORTS; i++) {
++			vgt_clear_port(vgt, i);
 +		}
++		return;
 +	}
++
++	if (index < 0 || index >= I915_MAX_PORTS) {
++		vgt_warn("Wrong port index input! Will do nothing!\n");
++		return;
++	}
++
++	port = &vgt->ports[index];
++	vgt_clear_edid(port);
++	vgt_clear_dpcd(port);
++	
++	if (port->type >= 0 && port->type < VGT_PORT_MAX) {
++		clear_bit(vgt->ports[index].type,
++			  vgt->presented_ports);
++	}
++
++	port->type = VGT_PORT_MAX;
 +}
 +
 +/**************************************************************************
@@ -19128,6 +19442,8 @@ index 0000000..7e2b9ae
 +{
 +	vgt_edid_data_t *edid_data = NULL;
 +	vgt_reg_t wvalue = *(vgt_reg_t *)p_data;
++	struct gt_port *port = NULL;
++
 +	switch (wvalue & _GMBUS_PIN_SEL_MASK) {
 +	case 0: /* disabled. Be treated as reset */
 +		edid_data = NULL;
@@ -19137,19 +19453,16 @@ index 0000000..7e2b9ae
 +			vgt->vgt_id);
 +		break;
 +	case 2: /* Analog Mon */
-+		edid_data = vgt->vgt_edids[VGT_CRT];
-+		break;
-+	case 3: /* LVDS */
-+		edid_data = vgt->vgt_edids[VGT_LVDS];
++		port = &vgt->ports[port_type_to_port(VGT_CRT)];
 +		break;
 +	case 4: /* Port C use */
-+		edid_data = vgt->vgt_edids[VGT_HDMI_C];
++		port = &vgt->ports[port_type_to_port(VGT_HDMI_C)];
 +		break;
 +	case 5: /* Port B use */
-+		edid_data = vgt->vgt_edids[VGT_HDMI_B];
++		port = &vgt->ports[port_type_to_port(VGT_HDMI_B)];
 +		break;
 +	case 6: /* Port D use */
-+		edid_data = vgt->vgt_edids[VGT_HDMI_D];
++		port = &vgt->ports[port_type_to_port(VGT_HDMI_D)];
 +		break;
 +	case 7:
 +		printk("vGT(%d): WARNING: GMBUS accessing reserved port!!!!\n", vgt->vgt_id);
@@ -19158,18 +19471,21 @@ index 0000000..7e2b9ae
 +		printk("vGT(%d): EDID unknown ERROR!\n", vgt->vgt_id);
 +	}
 +
++	if (port) 
++		edid_data = port->edid;
++
 +	vgt_init_i2c_bus(&vgt->vgt_i2c_bus);
 +	//vgt->vgt_i2c_bus.state = VGT_I2C_SEND;
-+	vgt->vgt_i2c_bus.gmbus.pedid = edid_data;
 +	vgt->vgt_i2c_bus.gmbus.phase = GMBUS_IDLE_PHASE;
 +
 +	/* Initialize status reg
 +	 * FIXME: never clear _GMBUS_HW_WAIT */
 +	__vreg(vgt, _REG_PCH_GMBUS2) &= ~ _GMBUS_ACTIVE;
 +	__vreg(vgt, _REG_PCH_GMBUS2) |= _GMBUS_HW_RDY | _GMBUS_HW_WAIT;
-+	if (edid_data && edid_data->data_valid)
++	if (edid_data && edid_data->data_valid && !(port->dpcd && port->dpcd->data_valid)) {
 +		__vreg(vgt, _REG_PCH_GMBUS2) &= ~_GMBUS_NAK;
-+	else
++		vgt->vgt_i2c_bus.gmbus.pedid = edid_data;
++	} else
 +		__vreg(vgt, _REG_PCH_GMBUS2) |= _GMBUS_NAK;
 +
 +	memcpy(p_data, (char *)vgt->state.vReg + offset, bytes);
@@ -19234,7 +19550,7 @@ index 0000000..7e2b9ae
 +			i2c_bus->edid_slave.edid_data = i2c_bus->gmbus.pedid;
 +
 +		} else if (slave_addr != 0) {
-+			vgt_dbg("vGT(%d): unsupported gmbus slave addr(%x)\n",
++			vgt_dbg(VGT_DBG_DPY, "vGT(%d): unsupported gmbus slave addr(%x)\n",
 +					vgt->vgt_id, slave_addr);
 +			i2c_bus->current_slave = (vgt_i2c_slave_t *)&i2c_bus->edid_slave;
 +			i2c_bus->edid_slave.edid_data = i2c_bus->gmbus.pedid;
@@ -19468,7 +19784,6 @@ index 0000000..7e2b9ae
 +}
 +
 +void vgt_i2c_handle_aux_ch_read(vgt_i2c_bus_t *i2c_bus,
-+				vgt_edid_data_t **pedid,
 +				unsigned int offset,
 +				VGT_DP_PORTS_IDX port_idx, void *p_data)
 +{
@@ -19632,10 +19947,10 @@ index 0000000..7e2b9ae
 +}
 diff --git a/drivers/xen/vgt/edid.h b/drivers/xen/vgt/edid.h
 new file mode 100644
-index 0000000..5883f9e
+index 0000000..b8d3bf2
 --- /dev/null
 +++ b/drivers/xen/vgt/edid.h
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,302 @@
 +/*
 + * vGT header file for EDID virtualization
 + *
@@ -19927,7 +20242,6 @@ index 0000000..5883f9e
 +	void *p_data, unsigned int bytes);
 +
 +void vgt_i2c_handle_aux_ch_read(vgt_i2c_bus_t *i2c_bus,
-+				vgt_edid_data_t **pedid,
 +				unsigned int offset,
 +				VGT_DP_PORTS_IDX port_idx, void *p_data);
 +
@@ -19936,13 +20250,15 @@ index 0000000..5883f9e
 +				unsigned int offset,
 +				VGT_DP_PORTS_IDX port_idx, void *p_data);
 +
++bool vgt_is_edid_valid(u8 *raw_edid);
++
 +#endif /*_VGT_EDID_H_*/
 diff --git a/drivers/xen/vgt/fb_decoder.c b/drivers/xen/vgt/fb_decoder.c
 new file mode 100644
-index 0000000..b2f5536
+index 0000000..364dfa2
 --- /dev/null
 +++ b/drivers/xen/vgt/fb_decoder.c
-@@ -0,0 +1,530 @@
+@@ -0,0 +1,552 @@
 +/*
 + * Decode framebuffer attributes from raw vMMIO
 + *
@@ -20017,7 +20333,8 @@ index 0000000..b2f5536
 +	plane->base = __vreg(vgt, VGT_DSPSURF(pipe)) & GTT_PAGE_MASK;
 +	plane->stride = __vreg(vgt, VGT_DSPSTRIDE(pipe)) &
 +				_PRI_PLANE_STRIDE_MASK;
-+	plane->width = __vreg(vgt, VGT_HTOTAL(pipe)) & _ACTIVE_WIDTH_MASK;
++	plane->width = (__vreg(vgt, VGT_PIPESRC(pipe)) & _PIPE_H_SRCSZ_MASK) >>
++				_PIPE_H_SRCSZ_SHIFT;
 +	plane->width += 1;
 +	plane->height = (__vreg(vgt, VGT_PIPESRC(pipe)) &
 +			 _PIPE_V_SRCSZ_MASK) >> _PIPE_V_SRCSZ_SHIFT;
@@ -20165,7 +20482,7 @@ index 0000000..b2f5536
 +
 +	plane->drm_format = drm_format;
 +
-+	plane->base = __vreg(vgt, VGT_SPRSURFPIPE(pipe)) & GTT_PAGE_MASK;
++	plane->base = __vreg(vgt, VGT_SPRSURF(pipe)) & GTT_PAGE_MASK;
 +	plane->width = __vreg(vgt, VGT_SPRSTRIDE(pipe)) &
 +				_SPRITE_STRIDE_MASK;
 +	plane->width /= plane->bpp / 8;	/* raw width in bytes */
@@ -20282,11 +20599,23 @@ index 0000000..b2f5536
 +		vgt_dump_cursor_plane_format(buf, &pipe->cursor);
 +		vgt_dump_sprite_plane_format(buf, &pipe->sprite);
 +		dump_string(buf, "Pipe remapping\n");
-+		if (pipe->physical_pipe_id != INVALID_PIPE_ID) {
-+			dump_string(buf, "  virtual pipe:%d -> physical pipe:%d\n",
-+				 i, pipe->physical_pipe_id);
-+		} else {
++		if (pipe->ddi_port == DDI_PORT_NONE) {
 +			dump_string(buf, "  no mapping available for this pipe\n");
++		} else {
++			char port_id;
++			switch (pipe->ddi_port) {
++			case DDI_PORT_B:
++				port_id = 'B'; break;
++			case DDI_PORT_C:
++				port_id = 'C'; break;
++			case DDI_PORT_D:
++				port_id = 'D'; break;
++			case DDI_PORT_E:
++			default:
++				port_id = 'E'; break;
++			}
++			dump_string(buf, "  virtual pipe:%d -> DDI PORT:%c\n",
++				 i, port_id);
 +		}
 +	}
 +	dump_string(buf, "\n");
@@ -20348,12 +20677,22 @@ index 0000000..b2f5536
 +
 +	for (i = 0; i < MAX_INTEL_PIPES; i++) {
 +		struct vgt_pipe_format *pipe = &fb->pipes[i];
++		vgt_reg_t ddi_func_ctl = __vreg(vgt, _VGT_TRANS_DDI_FUNC_CTL(i));
++
++		if (!(ddi_func_ctl & _TRANS_DDI_PORT_SHIFT)) {
++			pipe->ddi_port = DDI_PORT_NONE;
++		} else {
++			vgt_reg_t port = (ddi_func_ctl & _REGBIT_TRANS_DDI_PORT_MASK) >>
++						_TRANS_DDI_PORT_SHIFT;
++			if ((port >= DDI_PORT_NONE) || (port <= DDI_PORT_E))
++				pipe->ddi_port = port;
++			else
++				pipe->ddi_port = DDI_PORT_NONE;
++		}
 +
 +		ret |= vgt_decode_primary_plane_format(vgt, i, &pipe->primary);
 +		ret |= vgt_decode_sprite_plane_format(vgt, i, &pipe->sprite);
 +		ret |= vgt_decode_cursor_plane_format(vgt, i, &pipe->cursor);
-+		pipe->physical_pipe_id = vgt->pipe_mapping[i] == I915_MAX_PIPES ?
-+			INVALID_PIPE_ID : vgt->pipe_mapping[i];
 +
 +		if (ret) {
 +			vgt_err("Decode format error for pipe(%d)\n", i);
@@ -20364,7 +20703,7 @@ index 0000000..b2f5536
 +
 +	vgt_unlock_dev_flags(pdev, cpu, flags);
 +
-+	if(vgt_debug)
++	if(vgt_debug & VGT_DBG_GENERIC)
 +	  vgt_show_fb_format(vmid, fb);
 +	return ret;
 +}
@@ -20439,8 +20778,7 @@ index 0000000..b2f5536
 +		return (-ENOMEM);
 +
 +	m->id.idx = CN_IDX_VGT;
-+	m->id.val = vgt->pipe_mapping[msg->pipe_id] == I915_MAX_PIPES ?
-+		INVALID_PIPE_ID : vgt->pipe_mapping[msg->pipe_id];
++	m->id.val = msg->pipe_id;
 +
 +	/*
 +	 * vgt plane ids are not exposed to userspace.
@@ -20475,10 +20813,10 @@ index 0000000..b2f5536
 +}
 diff --git a/drivers/xen/vgt/gtt.c b/drivers/xen/vgt/gtt.c
 new file mode 100644
-index 0000000..5052db5
+index 0000000..2bc6f20
 --- /dev/null
 +++ b/drivers/xen/vgt/gtt.c
-@@ -0,0 +1,752 @@
+@@ -0,0 +1,769 @@
 +/*
 + * GTT virtualization
 + *
@@ -20600,7 +20938,12 @@ index 0000000..5052db5
 +
 +	ASSERT(vgt->vm_id != 0);
 +
-+	p = &vgt->shadow_pte_table[((gma >> 22) & 0x3ff)];
++	if (unlikely(gma >= (1 << 31))) {
++		vgt_warn("invalid gma value 0x%lx\n", gma);
++		return INVALID_ADDR;
++	}
++
++	p = &vgt->shadow_pte_table[((gma >> 22) & 0x1ff)];
 +
 +	/* gpa is physical pfn from shadow page table, we need VM's
 +	 * pte page entry */
@@ -20622,7 +20965,12 @@ index 0000000..5052db5
 +	unsigned long pfn, gpa;
 +	u32 *ent, pte;
 +
-+	gtt_index = vgt->ppgtt_base + ((gma >> 22) & 0x3ff);
++	if (unlikely(gma >= (1 << 31))) {
++		vgt_warn("invalid gma value 0x%lx\n", gma);
++		return INVALID_ADDR;
++	}
++
++	gtt_index = vgt->ppgtt_base + ((gma >> 22) & 0x1ff);
 +	pfn = gtt_pte_get_pfn(vgt->pdev, vgt->vgtt[gtt_index]);
 +
 +	/* dom0 PTE page */
@@ -20660,7 +21008,6 @@ index 0000000..5052db5
 +{
 +	xen_hvm_vgt_wp_pages_t req;
 +	int i, rc = 0;
-+	unsigned long *p = pages;
 +
 +	if (nr > MAX_WP_BATCH_PAGES)
 +		return -1;
@@ -20671,7 +21018,7 @@ index 0000000..5052db5
 +	req.nr_pages = nr;
 +
 +	for (i = 0; i < nr; i++)
-+		req.wp_pages[i] = *pages++;
++		req.wp_pages[i] = pages[i];
 +
 +	rc = HYPERVISOR_hvm_op(HVMOP_vgt_wp_pages, &req);
 +	if (rc)
@@ -20684,10 +21031,11 @@ index 0000000..5052db5
 +			mht = kmalloc(sizeof(*mht), GFP_ATOMIC);
 +			if (!mht) {
 +				vgt_err("out of memory!\n");
-+				break;
++				vgt_unset_wp_pages(vgt, nr, pages);
++				return -ENOMEM;
 +			}
-+			mht->pfn = *p++;
-+			mht->idx = *idx++;
++			mht->pfn = pages[i];
++			mht->idx = idx[i];
 +			vgt_add_wp_page_entry(vgt, mht);
 +		}
 +	}
@@ -20705,7 +21053,6 @@ index 0000000..5052db5
 +{
 +	xen_hvm_vgt_wp_pages_t req;
 +	int i, rc = 0;
-+	unsigned long *p = pages;
 +
 +	if (nr > MAX_WP_BATCH_PAGES)
 +		return -1;
@@ -20716,14 +21063,14 @@ index 0000000..5052db5
 +	req.nr_pages = nr;
 +
 +	for (i = 0; i < nr; i++)
-+		req.wp_pages[i] = *pages++;
++		req.wp_pages[i] = pages[i];
 +
 +	rc = HYPERVISOR_hvm_op(HVMOP_vgt_wp_pages, &req);
 +	if (rc)
 +		vgt_err("Unset WP pages failed!\n");
 +	else {
 +		for (i = 0; i < nr; i++)
-+			vgt_del_wp_page_entry(vgt, *p++);
++			vgt_del_wp_page_entry(vgt, pages[i]);
 +	}
 +
 +	return rc;
@@ -20846,11 +21193,11 @@ index 0000000..5052db5
 +	u32 h_gtt_index;
 +
 +	if (vgt->shadow_pde_table[i].entry == g_gtt_val) {
-+		vgt_dbg("write same PDE value?\n");
++		vgt_dbg(VGT_DBG_MEM, "write same PDE value?\n");
 +		return;
 +	}
 +
-+	vgt_dbg("write PDE[%d] old: 0x%x new: 0x%x\n", i, vgt->shadow_pde_table[i].entry, g_gtt_val);
++	vgt_dbg(VGT_DBG_MEM, "write PDE[%d] old: 0x%x new: 0x%x\n", i, vgt->shadow_pde_table[i].entry, g_gtt_val);
 +
 +	if (vgt->shadow_pde_table[i].entry & _REGBIT_PDE_VALID)
 +		vgt_unset_wp_page(vgt, vgt->shadow_pde_table[i].virtual_phyaddr >> PAGE_SHIFT);
@@ -20873,7 +21220,7 @@ index 0000000..5052db5
 +	off -= vgt->pdev->mmio_size;
 +	/*
 +	if (off >= vgt->vgtt_sz) {
-+		vgt_dbg("vGT(%d): captured out of range GTT read on off %x\n", vgt->vgt_id, off);
++		vgt_dbg(VGT_DBG_MEM, "vGT(%d): captured out of range GTT read on off %x\n", vgt->vgt_id, off);
 +		return false;
 +	}
 +	*/
@@ -20939,7 +21286,7 @@ index 0000000..5052db5
 +
 +		/* print info every 32MB */
 +		if (!(count % 8192))
-+			vgt_dbg("vGT(%d): capture ballooned write for %d times (%x)\n",
++			vgt_dbg(VGT_DBG_MEM, "vGT(%d): capture ballooned write for %d times (%x)\n",
 +				vgt->vgt_id, count, off);
 +
 +		count++;
@@ -20950,7 +21297,7 @@ index 0000000..5052db5
 +	if (vgt->ppgtt_initialized &&
 +			g_gtt_index >= vgt->ppgtt_base &&
 +			g_gtt_index < vgt->ppgtt_base + VGT_PPGTT_PDE_ENTRIES) {
-+		vgt_dbg("vGT(%d): Change PPGTT PDE %d!\n", vgt->vgt_id, g_gtt_index);
++		vgt_dbg(VGT_DBG_MEM, "vGT(%d): Change PPGTT PDE %d!\n", vgt->vgt_id, g_gtt_index);
 +		vgt_ppgtt_pde_write(vgt, g_gtt_index, g_gtt_val);
 +		goto out;
 +	}
@@ -21007,10 +21354,14 @@ index 0000000..5052db5
 +	int index, i;
 +	u32 *pte;
 +	unsigned long g_val = 0, g_addr = 0, h_addr = 0;
++	struct vgt_statistics *stat = &vgt->stat;
++	cycles_t t0, t1;
 +
 +	ASSERT(vgt->vm_id != 0);
 +
-+	vgt_dbg("PTE WP handler: offset 0x%x data 0x%lx bytes %d\n", offset, *(unsigned long *)p_data, bytes);
++	t0 = get_cycles();
++
++	vgt_dbg(VGT_DBG_MEM, "PTE WP handler: offset 0x%x data 0x%lx bytes %d\n", offset, *(unsigned long *)p_data, bytes);
 +
 +	i = e->idx;
 +
@@ -21039,7 +21390,11 @@ index 0000000..5052db5
 +	clflush((u8 *)pte + index * 4);
 +	kunmap_atomic(pte);
 +
-+	vgt_dbg("WP: PDE[%d], PTE[%d], entry 0x%x, g_addr 0x%lx, h_addr 0x%lx\n", i, index, pte[index], g_addr, h_addr);
++	vgt_dbg(VGT_DBG_MEM, "WP: PDE[%d], PTE[%d], entry 0x%x, g_addr 0x%lx, h_addr 0x%lx\n", i, index, pte[index], g_addr, h_addr);
++
++	t1 = get_cycles();
++	stat->ppgtt_wp_cnt++;
++	stat->ppgtt_wp_cycles += t1 - t0;		
 +
 +	return true;
 +}
@@ -21069,7 +21424,7 @@ index 0000000..5052db5
 +void vgt_ppgtt_switch(struct vgt_device *vgt)
 +{
 +	u32 base = vgt->rb[0].sring_ppgtt_info.base;
-+	vgt_dbg("vGT: VM(%d): switch to ppgtt base 0x%x\n", vgt->vm_id, base);
++	vgt_dbg(VGT_DBG_MEM, "vGT: VM(%d): switch to ppgtt base 0x%x\n", vgt->vm_id, base);
 +	vgt_init_ppgtt_hw(vgt, base);
 +}
 +
@@ -21119,7 +21474,7 @@ index 0000000..5052db5
 +	/* only hvm guest needs shadowed PT pages */
 +	ASSERT(vgt->vm_id != 0);
 +
-+	vgt_dbg("vgt_init_shadow_ppgtt for vm %d\n", vgt->vm_id);
++	vgt_dbg(VGT_DBG_MEM, "vgt_init_shadow_ppgtt for vm %d\n", vgt->vm_id);
 +
 +	/* each PDE entry has one shadow PTE page */
 +	for (i = 0; i < VGT_PPGTT_PDE_ENTRIES; i++) {
@@ -21199,7 +21554,7 @@ index 0000000..5052db5
 +			return;
 +		}
 +	}
-+	vgt_dbg("zhen: all rings are set PPGTT base and use single table!\n");
++	vgt_dbg(VGT_DBG_MEM, "zhen: all rings are set PPGTT base and use single table!\n");
 +	vgt_setup_ppgtt(vgt);
 +}
 +
@@ -21215,7 +21570,7 @@ index 0000000..5052db5
 +	__vreg(vgt, off) = mode;
 +
 +	if (reg_hw_access(vgt, off)) {
-+		vgt_dbg("RING mode: offset 0x%x write 0x%x\n", off, s_info->mode);
++		vgt_dbg(VGT_DBG_MEM, "RING mode: offset 0x%x write 0x%x\n", off, s_info->mode);
 +		VGT_MMIO_WRITE(vgt->pdev, off, s_info->mode);
 +	}
 +
@@ -21233,10 +21588,10 @@ index 0000000..5052db5
 +}
 diff --git a/drivers/xen/vgt/handlers.c b/drivers/xen/vgt/handlers.c
 new file mode 100644
-index 0000000..0cd5696
+index 0000000..738840a
 --- /dev/null
 +++ b/drivers/xen/vgt/handlers.c
-@@ -0,0 +1,3310 @@
+@@ -0,0 +1,3361 @@
 +/*
 + * MMIO virtualization handlers
 + *
@@ -21282,13 +21637,19 @@ index 0000000..0cd5696
 +static bool gmbus_mmio_read(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
-+	return vgt_i2c_handle_gmbus_read(vgt, offset, p_data, bytes);
++	if (reg_hw_access(vgt, offset))
++		return default_mmio_read(vgt, offset, p_data, bytes);
++	else
++		return vgt_i2c_handle_gmbus_read(vgt, offset, p_data, bytes);
 +}
 +
 +static bool gmbus_mmio_write(struct vgt_device *vgt, unsigned int offset,
 +	void *p_data, unsigned int bytes)
 +{
-+	return vgt_i2c_handle_gmbus_write(vgt, offset, p_data, bytes);
++	if (reg_hw_access(vgt, offset))
++		return default_mmio_write(vgt, offset, p_data, bytes);
++	else
++		return vgt_i2c_handle_gmbus_write(vgt, offset, p_data, bytes);
 +}
 +
 +static bool fence_mmio_read(struct vgt_device *vgt, unsigned int off,
@@ -21343,13 +21704,13 @@ index 0000000..0cd5696
 +
 +static void set_vRC_to_C6(struct vgt_device *vgt)
 +{
-+	vgt_dbg("Virtual Render C state set to C6\n");
++	vgt_dbg(VGT_DBG_GENERIC, "Virtual Render C state set to C6\n");
 +	set_vRC(vgt, 3);
 +}
 +
 +static void set_vRC_to_C0(struct vgt_device *vgt)
 +{
-+	vgt_dbg("Virtual Render C state set to C0\n");
++	vgt_dbg(VGT_DBG_GENERIC, "Virtual Render C state set to C0\n");
 +	set_vRC(vgt, 0);
 +}
 +
@@ -21413,7 +21774,7 @@ index 0000000..0cd5696
 +
 +	data = (*(uint32_t*) p_data) & 1 ;
 +
-+	vgt_dbg("VM%d write register FORCE_WAKE with %x\n", vgt->vm_id, data);
++	vgt_dbg(VGT_DBG_GENERIC, "VM%d write register FORCE_WAKE with %x\n", vgt->vm_id, data);
 +
 +	if (IS_HSW(vgt->pdev)) {
 +		__vreg(vgt, _REG_FORCEWAKE_ACK_HSW) = data;
@@ -21448,7 +21809,7 @@ index 0000000..0cd5696
 +
 +	data = *(uint32_t*) p_data;
 +
-+	vgt_dbg("VM%d write register FORCE_WAKE_MT with %x\n", vgt->vm_id, data);
++	vgt_dbg(VGT_DBG_GENERIC, "VM%d write register FORCE_WAKE_MT with %x\n", vgt->vm_id, data);
 +
 +	if (!(__vreg(vgt, _REG_ECOBUS) & ECOBUS_FORCEWAKE_MT_ENABLE)){
 +		__vreg(vgt, _REG_MUL_FORCEWAKE) = data;
@@ -21555,17 +21916,22 @@ index 0000000..0cd5696
 +
 +	if (data & _REGBIT_GEN6_GRDOM_RENDER) {
 +		vgt_info("VM %d request GPU Render Reset\n", vgt->vm_id);
-+		ring_bitmap |= (1 << 0);
++		ring_bitmap |= (1 << RING_BUFFER_RCS);
 +	}
 +
 +	if (data & _REGBIT_GEN6_GRDOM_MEDIA) {
 +		vgt_info("VM %d request GPU Media Reset\n", vgt->vm_id);
-+		ring_bitmap |= (1 << 2);
++		ring_bitmap |= (1 << RING_BUFFER_VCS);
 +	}
 +
 +	if (data & _REGBIT_GEN6_GRDOM_BLT) {
 +		vgt_info("VM %d request GPU BLT Reset\n", vgt->vm_id);
-+		ring_bitmap |= (1 << 1);
++		ring_bitmap |= (1 << RING_BUFFER_BCS);
++	}
++
++	if (IS_HSW(vgt->pdev) && (data & (1 << 4))) {
++		vgt_info("VM %d request GPU VECS Reset\n", vgt->vm_id);
++		ring_bitmap |= (1 << RING_BUFFER_VECS);
 +	}
 +
 +	return handle_device_reset(vgt, offset, p_data, bytes, ring_bitmap);
@@ -21803,7 +22169,7 @@ index 0000000..0cd5696
 +
 +	*(u32 *)p_data = v_info->base;
 +
-+	vgt_dbg("<ring-%d>PP_DIR_BASE read: 0x%x\n", ring_id, v_info->base);
++	vgt_dbg(VGT_DBG_RENDER, "<ring-%d>PP_DIR_BASE read: 0x%x\n", ring_id, v_info->base);
 +	return true;
 +}
 +
@@ -21815,7 +22181,7 @@ index 0000000..0cd5696
 +	vgt_ring_ppgtt_t *v_info = &vgt->rb[ring_id].vring_ppgtt_info;
 +	vgt_ring_ppgtt_t *s_info = &vgt->rb[ring_id].sring_ppgtt_info;
 +
-+	vgt_dbg("<ring-%d> PP_DIR_BASE write: 0x%x\n", ring_id, base);
++	vgt_dbg(VGT_DBG_RENDER, "<ring-%d> PP_DIR_BASE write: 0x%x\n", ring_id, base);
 +
 +	/* convert base which is in form of bit 31-16 in 64bytes cachelines,
 +	 * it turns out to be ((((base >> 16) * 64) >> 2) << PAGE_SHIFT), which
@@ -21846,7 +22212,7 @@ index 0000000..0cd5696
 +	__sreg(vgt, off) = dclv;
 +
 +	/* TODO: forward to pReg? */
-+	vgt_dbg("PP_DCLV write: 0x%x\n", dclv);
++	vgt_dbg(VGT_DBG_RENDER, "PP_DCLV write: 0x%x\n", dclv);
 +	return true;
 +}
 +
@@ -21858,7 +22224,7 @@ index 0000000..0cd5696
 +	vgt_ring_ppgtt_t *v_info = &vgt->rb[ring_id].vring_ppgtt_info;
 +
 +	*(u32 *)p_data = v_info->mode;
-+	vgt_dbg("<ring-%d>GFX_MODE read: 0x%x\n", ring_id, v_info->mode);
++	vgt_dbg(VGT_DBG_RENDER, "<ring-%d>GFX_MODE read: 0x%x\n", ring_id, v_info->mode);
 +	return true;
 +}
 +
@@ -21868,7 +22234,7 @@ index 0000000..0cd5696
 +	u32 mode = *(u32 *)p_data;
 +	int ring_id = pp_mmio_to_ring_id(off);
 +
-+	vgt_dbg("<ring-%d>GFX_MODE write: 0x%x\n", ring_id, mode);
++	vgt_dbg(VGT_DBG_RENDER, "<ring-%d>GFX_MODE write: 0x%x\n", ring_id, mode);
 +
 +	if (ring_id == RING_BUFFER_VECS)
 +		vgt->vebox_support = 1;
@@ -21883,7 +22249,6 @@ index 0000000..0cd5696
 +	void *p_data, unsigned int bytes)
 +{
 +	bool rc = true;
-+	vgt_edid_data_t **pedid = NULL;
 +	VGT_DP_PORTS_IDX port_idx;
 +
 +	ASSERT(bytes == 4);
@@ -21892,28 +22257,7 @@ index 0000000..0cd5696
 +	rc = default_mmio_read(vgt, offset, p_data, bytes);
 +
 +	port_idx = vgt_get_dp_port_idx(offset);
-+	switch (port_idx) {
-+	case VGT_DPA_IDX:
-+		pedid = (vgt_edid_data_t **) &vgt->vgt_edids[VGT_DP_A];
-+		break;
-+	case VGT_DPB_IDX:
-+		pedid = (vgt_edid_data_t **) &vgt->vgt_edids[VGT_DP_B];
-+		break;
-+	case VGT_DPC_IDX:
-+		pedid = (vgt_edid_data_t **) &vgt->vgt_edids[VGT_DP_C];
-+		break;
-+	case VGT_DPD_IDX:
-+		pedid = (vgt_edid_data_t **) &vgt->vgt_edids[VGT_DP_D];
-+		break;
-+	default:
-+		printk("vGT(%d): WARNING: Unsupported DP port [0x%x]access!\n",
-+				vgt->vgt_id, offset);
-+		BUG();
-+		break;
-+	}
-+
-+	vgt_i2c_handle_aux_ch_read(&vgt->vgt_i2c_bus, pedid,
-+				offset, port_idx, p_data);
++	vgt_i2c_handle_aux_ch_read(&vgt->vgt_i2c_bus, offset, port_idx, p_data);
 +
 +	return rc;
 +}
@@ -22450,6 +22794,7 @@ index 0000000..0cd5696
 +	case _REG_DSPATILEOFF:
 +	case _REG_SPRASURF:
 +	case _REG_SPRA_CTL:
++	case _REG_PIPEASRC:
 +		real_pipe = vgt->pipe_mapping[0];
 +		virtual_pipe = PIPE_A;
 +		break;
@@ -22470,6 +22815,7 @@ index 0000000..0cd5696
 +	case _REG_DSPBTILEOFF:
 +	case _REG_SPRBSURF:
 +	case _REG_SPRB_CTL:
++	case _REG_PIPEBSRC:
 +		real_pipe = vgt->pipe_mapping[1];
 +		virtual_pipe = PIPE_B;
 +		break;
@@ -22487,6 +22833,7 @@ index 0000000..0cd5696
 +	case _REG_DSPCTILEOFF:
 +	case _REG_SPRCSURF:
 +	case _REG_SPRC_CTL:
++	case _REG_PIPECSRC:
 +		real_pipe = vgt->pipe_mapping[2];
 +		virtual_pipe = PIPE_C;
 +		break;
@@ -22498,7 +22845,7 @@ index 0000000..0cd5696
 +
 +	if(real_pipe == I915_MAX_PIPES)
 +	{
-+		vgt_dbg("the mapping for pipe %d is not ready or created!\n", virtual_pipe);
++		vgt_dbg(VGT_DBG_DPY, "the mapping for pipe %d is not ready or created!\n", virtual_pipe);
 +		return false;
 +	}
 +
@@ -22535,8 +22882,12 @@ index 0000000..0cd5696
 +	void *p_data, unsigned int bytes)
 +{
 +	enum vgt_pipe pipe = PIPE_A;
++	enum vgt_pipe p_pipe = I915_MAX_PIPES;
++	enum vgt_pipe v_pipe = I915_MAX_PIPES;
 +	vgt_reg_t new_plane_ctl;
 +	bool enable_plane = false;
++	struct vgt_device *foreground_vgt;
++	int i;
 +
 +	new_plane_ctl = *(vgt_reg_t *)p_data;
 +	pipe = VGT_DSPCNTRPIPE(offset);
@@ -22544,16 +22895,25 @@ index 0000000..0cd5696
 +		enable_plane = true;
 +	}
 +
++	dpy_plane_mmio_write(vgt, offset, p_data, bytes);
 +	if (enable_plane) {
 +		if (current_foreground_vm(vgt->pdev) == vgt) {
 +			set_panel_fitting(vgt, pipe);
 +		} else if (is_current_display_owner(vgt)) {
-+			set_panel_fitting(current_foreground_vm(vgt->pdev), pipe);
++			p_pipe = vgt->pipe_mapping[pipe];
++			foreground_vgt = current_foreground_vm(vgt->pdev);
++			for (i = 0; i < I915_MAX_PIPES; i++) {
++				if (foreground_vgt->pipe_mapping[i] == p_pipe) {
++					v_pipe = i;
++					break;
++				}
++			}
++			if (p_pipe != I915_MAX_PIPES && v_pipe != I915_MAX_PIPES) {
++				set_panel_fitting(foreground_vgt, v_pipe);
++			}
 +		}
 +		vgt_surf_base_range_check(vgt, pipe, PRIMARY_PLANE);
 +	}
-+
-+	dpy_plane_mmio_write(vgt,offset, p_data,bytes);
 +
 +	return true;
 +}
@@ -22815,6 +23175,7 @@ index 0000000..0cd5696
 +	vgt_edid_data_t *edid = NULL;
 +	struct vgt_dpcd_data *dpcd = NULL;
 +	VGT_DP_PORTS_IDX port_idx = vgt_get_dp_port_idx(offset);
++	struct gt_port *port = NULL;
 +
 +	ASSERT(bytes == 4);
 +	ASSERT((offset & (bytes - 1)) == 0);
@@ -22843,26 +23204,27 @@ index 0000000..0cd5696
 +
 +	switch (port_idx) {
 +	case VGT_DPA_IDX:
-+		edid = vgt->vgt_edids[VGT_DP_A];
-+		dpcd = vgt->vgt_dpcds[DPCD_DPA];
++		port = &vgt->ports[port_type_to_port(VGT_DP_A)];
 +		break;
 +	case VGT_DPB_IDX:
-+		edid = vgt->vgt_edids[VGT_DP_B];
-+		dpcd = vgt->vgt_dpcds[DPCD_DPB];
++		port = &vgt->ports[port_type_to_port(VGT_DP_B)];
 +		break;
 +	case VGT_DPC_IDX:
-+		edid = vgt->vgt_edids[VGT_DP_C];
-+		dpcd = vgt->vgt_dpcds[DPCD_DPC];
++		port = &vgt->ports[port_type_to_port(VGT_DP_C)];
 +		break;
 +	case VGT_DPD_IDX:
-+		edid = vgt->vgt_edids[VGT_DP_D];
-+		dpcd = vgt->vgt_dpcds[DPCD_DPD];
++		port = &vgt->ports[port_type_to_port(VGT_DP_D)];
 +		break;
 +	default:
 +		vgt_warn("vGT(%d): Unsupported DP port access!\n",
 +				vgt->vgt_id);
 +		BUG();
 +		break;
++	}
++
++	if (port) {
++		edid = port->edid;
++		dpcd = port->dpcd;
 +	}
 +
 +	/* read out message from DATA1 register */
@@ -22986,6 +23348,9 @@ index 0000000..0cd5696
 +	}
 +
 +	/* i2c transaction starts */
++	if (!(dpcd && dpcd->data_valid)) {
++		edid = NULL;
++	}
 +
 +	vgt_i2c_handle_aux_ch_write(&vgt->vgt_i2c_bus, edid,
 +				offset, port_idx, p_data);
@@ -23301,6 +23666,9 @@ index 0000000..0cd5696
 +				vgt->pdev->next_foreground_vm = vgt;
 +				vgt_raise_request(vgt->pdev, VGT_REQUEST_DPY_SWITCH);
 +			}
++			if (propagate_monitor_to_guest && vgt->vm_id == 0 && event == VGT_DISPLAY_READY) {
++				vgt_detect_display(vgt, -1);
++			}
 +			break;
 +		case vgt_info_off(g2v_notify):
 +			if (val == VGT_G2V_DISPLAY_REFRESH) {
@@ -23481,6 +23849,44 @@ index 0000000..0cd5696
 +	}
 +
 +	__sreg(vgt, offset) = __vreg(vgt, offset);
++
++	return true;
++}
++
++bool fpga_dbg_mmio_read(struct vgt_device *vgt, unsigned int reg,
++        void *p_data, unsigned int bytes)
++{
++	bool rc;
++
++	rc = default_mmio_read(vgt, reg, p_data, bytes);
++	if (!rc)
++		return false;
++
++	if (vgt->vm_id == 0 && (__vreg(vgt, reg) & _REGBIT_FPGA_DBG_RM_NOCLAIM)) {
++		VGT_MMIO_WRITE(vgt->pdev, reg, _REGBIT_FPGA_DBG_RM_NOCLAIM);
++
++		__vreg(vgt, reg) &= ~_REGBIT_FPGA_DBG_RM_NOCLAIM;
++		__sreg(vgt, reg) = __vreg(vgt, reg);
++
++		*(vgt_reg_t *)p_data &= ~_REGBIT_FPGA_DBG_RM_NOCLAIM;
++	}
++
++	return true;
++}
++
++bool fpga_dbg_mmio_write(struct vgt_device *vgt, unsigned int reg,
++	void *p_data, unsigned int bytes)
++{
++	vgt_reg_t v = *(vgt_reg_t *)p_data;
++
++	vgt_warn("VM %d writes FPGA_DBG register: %x.\n", vgt->vm_id, v);
++
++	if (vgt->vm_id == 0)
++		return default_mmio_write(vgt, reg, p_data, bytes);
++	else {
++		__vreg(vgt, reg) &= ~v;
++		__sreg(vgt, reg) = __vreg(vgt, reg);
++	}
 +
 +	return true;
 +}
@@ -23701,7 +24107,7 @@ index 0000000..0cd5696
 +{_REG_SDEIMR, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_imr_handler},
 +{_REG_SDEIER, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_ier_handler},
 +{_REG_SDEIIR, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_iir_handler},
-+{_REG_SDEISR, 4, F_VIRT, 0, D_ALL, NULL, vgt_reg_isr_handler},
++{_REG_SDEISR, 4, F_VIRT, 0, D_ALL, vgt_reg_isr_read, vgt_reg_isr_write},
 +
 +{0xc4040, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 +
@@ -23883,7 +24289,7 @@ index 0000000..0cd5696
 +{_REG_VTOTAL_A, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +{_REG_VBLANK_A, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +{_REG_VSYNC_A, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
-+{_REG_PIPEASRC, 4, F_DPY, 0, D_ALL, NULL, NULL},
++{_REG_PIPEASRC, 4, F_DPY, 0, D_ALL, dpy_plane_mmio_read, dpy_plane_mmio_write},
 +{_REG_BCLRPAT_A, 4, F_DPY, 0, D_ALL, NULL, NULL},
 +{_REG_VSYNCSHIFT_A, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +
@@ -23893,7 +24299,7 @@ index 0000000..0cd5696
 +{_REG_VTOTAL_B, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +{_REG_VBLANK_B, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +{_REG_VSYNC_B, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
-+{_REG_PIPEBSRC, 4, F_DPY, 0, D_ALL, NULL, NULL},
++{_REG_PIPEBSRC, 4, F_DPY, 0, D_ALL, dpy_plane_mmio_read, dpy_plane_mmio_write},
 +{_REG_BCLRPAT_B, 4, F_DPY, 0, D_ALL, NULL, NULL},
 +{_REG_VSYNCSHIFT_B, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +
@@ -23903,7 +24309,7 @@ index 0000000..0cd5696
 +{_REG_VTOTAL_C, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +{_REG_VBLANK_C, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +{_REG_VSYNC_C, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
-+{_REG_PIPECSRC, 4, F_DPY, 0, D_ALL, NULL, NULL},
++{_REG_PIPECSRC, 4, F_DPY, 0, D_ALL, dpy_plane_mmio_read, dpy_plane_mmio_write},
 +{_REG_BCLRPAT_C, 4, F_DPY, 0, D_ALL, NULL, NULL},
 +{_REG_VSYNCSHIFT_C, 4, F_DPY, 0, D_ALL, NULL, dpy_modeset_mmio_write},
 +
@@ -23976,7 +24382,7 @@ index 0000000..0cd5696
 +{_REG_BLC_PWM_PCH_CTL1, 4, F_DOM0, 0, D_ALL, NULL, NULL},
 +{_REG_BLC_PWM_PCH_CTL2, 4, F_DOM0, 0, D_ALL, NULL, NULL},
 +
-+{_REG_PCH_GMBUS0, 4*4, F_VIRT, 0, D_ALL, gmbus_mmio_read, gmbus_mmio_write},
++{_REG_PCH_GMBUS0, 4*4, F_DPY, 0, D_ALL, gmbus_mmio_read, gmbus_mmio_write},
 +{_REG_PCH_GPIOA, 6*4, F_VIRT, 0, D_ALL, NULL, NULL},
 +
 +{_REG_DP_BUFTRANS, 0x28, F_DPY, 0, D_ALL, NULL, NULL},
@@ -24397,7 +24803,7 @@ index 0000000..0cd5696
 +
 +{0x45260, 4, F_PT, 0, D_HSW, NULL, NULL},
 +{0x13005c, 4, F_PT, 0, D_HSW, NULL, NULL},
-+{_REG_FPGA_DBG, 4, F_DOM0, 0, D_HSW, NULL, NULL},
++{_REG_FPGA_DBG, 4, F_DOM0, 0, D_HSW, fpga_dbg_mmio_read, fpga_dbg_mmio_write},
 +
 +/* DOM0 PM owns these registers. */
 +{_REG_SCRATCH1, 4, F_RDR, 0, D_HSW, NULL, NULL},
@@ -24415,7 +24821,7 @@ index 0000000..0cd5696
 +	printk("post mmio hooks initialized\n");
 +
 +	if (pdev->enable_ppgtt) {
-+		vgt_dbg("Hook up PPGTT register handlers\n");
++		vgt_dbg(VGT_DBG_MEM,"Hook up PPGTT register handlers\n");
 +		/* trap PPGTT base register */
 +		reg_update_handlers(pdev, _REG_RCS_PP_DIR_BASE_IVB, 4,
 +				pp_dir_base_read, pp_dir_base_write);
@@ -24549,7 +24955,7 @@ index 0000000..0cd5696
 +}
 diff --git a/drivers/xen/vgt/hypercall.c b/drivers/xen/vgt/hypercall.c
 new file mode 100644
-index 0000000..1df6d5d
+index 0000000..c95e5af
 --- /dev/null
 +++ b/drivers/xen/vgt/hypercall.c
 @@ -0,0 +1,479 @@
@@ -24883,7 +25289,7 @@ index 0000000..1df6d5d
 +
 +		/* Don't warn on [0xa0000, 0x100000): a known non-RAM hole */
 +		if (i < (0xa0000 >> PAGE_SHIFT))
-+			vgt_dbg("vGT: VM%d: can't map GPFN %ld!\n",
++			vgt_dbg(VGT_DBG_GENERIC, "vGT: VM%d: can't map GPFN %ld!\n",
 +				vgt->vm_id, i);
 +	}
 +
@@ -24916,7 +25322,7 @@ index 0000000..1df6d5d
 +
 +			if (vgt->vmem_vma_4k[j]) {
 +				count++;
-+				vgt_dbg("map 4k gpa (%lx)\n", j << PAGE_SHIFT);
++				vgt_dbg(VGT_DBG_GENERIC, "map 4k gpa (%lx)\n", j << PAGE_SHIFT);
 +			}
 +		}
 +
@@ -24925,7 +25331,7 @@ index 0000000..1df6d5d
 +		 * message if it's at every 64MB boundary or >4GB memory.
 +		 */
 +		if ((i % 64 == 0) || (i >= (1ULL << (32 - VMEM_BUCK_SHIFT))))
-+			vgt_dbg("vGT: VM%d: can't map %ldKB\n",
++			vgt_dbg(VGT_DBG_GENERIC, "vGT: VM%d: can't map %ldKB\n",
 +				vgt->vm_id, i);
 +	}
 +	printk("end vmem_map (%ld 4k mappings)\n", count);
@@ -25034,10 +25440,10 @@ index 0000000..1df6d5d
 +
 diff --git a/drivers/xen/vgt/instance.c b/drivers/xen/vgt/instance.c
 new file mode 100644
-index 0000000..90f1349
+index 0000000..00ee3ac
 --- /dev/null
 +++ b/drivers/xen/vgt/instance.c
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,529 @@
 +/*
 + * Instance life-cycle management
 + *
@@ -25077,7 +25483,7 @@ index 0000000..90f1349
 +	struct vgt_device *vgt;
 +
 +	ASSERT(vgt_id_alloc_bitmap != ~0UL)
-+	for_each_set_bit(bit, &vgt_id_alloc_bitmap, (8 * sizeof(unsigned long))) {
++	for_each_set_bit(bit, &vgt_id_alloc_bitmap, VGT_MAX_VMS) {
 +		vgt = default_device.device[bit];
 +		if (vgt && vgt->vm_id == vmid)
 +			return vgt;
@@ -25119,7 +25525,7 @@ index 0000000..90f1349
 +	vgt_state_t	*state;
 +	int i;
 +
-+	vgt_dbg("create_state_instance\n");
++	vgt_dbg(VGT_DBG_GENERIC, "create_state_instance\n");
 +	state = &vgt->state;
 +	state->vReg = vzalloc(vgt->pdev->mmio_size);
 +	state->sReg = vzalloc(vgt->pdev->mmio_size);
@@ -25152,6 +25558,7 @@ index 0000000..90f1349
 +	struct vgt_device *vgt;
 +	char *cfg_space;
 +	int rc = -ENOMEM;
++	int i;
 +
 +	vgt_info("vm_id=%d, low_gm_sz=%dMB, high_gm_sz=%dMB, fence_sz=%d, vgt_primary=%d\n",
 +		vp.vm_id, vp.aperture_sz, vp.gm_sz-vp.aperture_sz, vp.fence_sz, vp.vgt_primary);
@@ -25178,6 +25585,13 @@ index 0000000..90f1349
 +		goto err;
 +
 +	memset(vgt->presented_ports, 0, sizeof(vgt->presented_ports));
++	for (i = 0; i < I915_MAX_PORTS; i++) {
++		vgt->ports[i].type = VGT_PORT_MAX;
++		vgt->ports[i].cache.type = VGT_PORT_MAX;
++		vgt->ports[i].port_override = i;
++		vgt->ports[i].cache.port_override = i;
++		vgt->ports[i].physcal_port = i;
++	}
 +
 +	/* Hard code ballooning now. We can support non-ballooning too in the future */
 +	vgt->ballooning = 1;
@@ -25340,13 +25754,18 @@ index 0000000..90f1349
 +		goto err;
 +	}
 +
-+	/* initialize i2c states */
-+	vgt_init_i2c_bus(&vgt->vgt_i2c_bus);
-+	/* assign aux_ch vregs for aux_ch virtualization */
-+	vgt_init_aux_ch_vregs(&vgt->vgt_i2c_bus, vgt->state.vReg);
-+	vgt_propagate_edid(vgt, -1);
-+	vgt_propagate_dpcd(vgt, -1);
-+	vgt_update_monitor_status(vgt);
++	if (vgt->vm_id != 0) {
++		/* initialize i2c states */
++		vgt_init_i2c_bus(&vgt->vgt_i2c_bus);
++		/* assign aux_ch vregs for aux_ch virtualization */
++		vgt_init_aux_ch_vregs(&vgt->vgt_i2c_bus, vgt->state.vReg);
++	}
++
++	if ((propagate_monitor_to_guest) && (vgt->vm_id != 0)) {
++		vgt_propagate_edid(vgt, -1);
++		vgt_propagate_dpcd(vgt, -1);
++		vgt_update_monitor_status(vgt);
++	}
 +
 +	*ptr_vgt = vgt;
 +
@@ -25413,12 +25832,12 @@ index 0000000..90f1349
 +
 +	printk("check display ownership...\n");
 +	if (!hvm_super_owner && (current_display_owner(pdev) == vgt)) {
-+		vgt_dbg("switch display ownership back to dom0\n");
++		vgt_dbg(VGT_DBG_DPY, "switch display ownership back to dom0\n");
 +		current_display_owner(pdev) = vgt_dom0;
 +	}
 +
 +	if (!hvm_super_owner && (current_foreground_vm(pdev) == vgt)) {
-+		vgt_dbg("switch foreground vm back to dom0\n");
++		vgt_dbg(VGT_DBG_DPY, "switch foreground vm back to dom0\n");
 +		pdev->next_foreground_vm = vgt_dom0;
 +		do_vgt_fast_display_switch(pdev);
 +	}
@@ -25446,22 +25865,32 @@ index 0000000..90f1349
 +
 +	vgt_unlock_dev(pdev, cpu);
 +
-+	for (i = 0; i < VGT_PORT_MAX; ++ i) {
-+		if (vgt->vgt_edids[i]) {
-+			kfree(vgt->vgt_edids[i]);
-+			vgt->vgt_edids[i] = NULL;
++	for (i = 0; i < I915_MAX_PORTS; i++) {
++		if (vgt->ports[i].edid) {
++			kfree(vgt->ports[i].edid);
++			vgt->ports[i].edid = NULL;
 +		}
-+	}
 +
-+	for (i = 0; i < DPCD_MAX; ++ i) {
-+		if (vgt->vgt_dpcds[i]) {
-+			kfree(vgt->vgt_dpcds[i]);
-+			vgt->vgt_dpcds[i] = NULL;
++		if (vgt->ports[i].dpcd) {
++			kfree(vgt->ports[i].dpcd);
++			vgt->ports[i].dpcd = NULL;
++		}
++
++		if (vgt->ports[i].cache.edid) {
++			kfree(vgt->ports[i].cache.edid);
++			vgt->ports[i].cache.edid = NULL;
++		}
++
++		if (vgt->ports[i].kobj.state_initialized) {
++			kobject_put(&vgt->ports[i].kobj);
 +		}
 +	}
 +
 +	if (vgt->pdev->enable_ppgtt)
 +		vgt_destroy_shadow_ppgtt(vgt);
++
++	/* clear the gtt entries for GM of this vgt device */
++	vgt_clear_gtt(vgt);
 +
 +	free_vm_aperture_gm_and_fence(vgt);
 +	free_vm_rsvd_aperture(vgt);
@@ -25493,7 +25922,7 @@ index 0000000..90f1349
 +		}
 +
 +		for_each_set_bit(bit, &ring_bitmap, sizeof(ring_bitmap)) {
-+			if (bit == vgt->pdev->max_engines)
++			if (bit >= vgt->pdev->max_engines)
 +				break;
 +
 +			vgt_info("VM %d: Reset ring %d PPGTT state.\n", vgt->vm_id, bit);
@@ -25512,7 +25941,7 @@ index 0000000..90f1349
 +	int bit;
 +
 +	for_each_set_bit(bit, &ring_bitmap, sizeof(ring_bitmap)) {
-+		if (bit == vgt->pdev->max_engines)
++		if (bit >= vgt->pdev->max_engines)
 +			break;
 +
 +		rb = &vgt->rb[bit];
@@ -25525,6 +25954,8 @@ index 0000000..90f1349
 +
 +		memset(&rb->vring, 0, sizeof(vgt_ringbuffer_t));
 +		memset(&rb->sring, 0, sizeof(vgt_ringbuffer_t));
++
++		vgt_disable_ring(vgt, bit);
 +	}
 +
 +	return;
@@ -25544,10 +25975,10 @@ index 0000000..90f1349
 +}
 diff --git a/drivers/xen/vgt/interrupt.c b/drivers/xen/vgt/interrupt.c
 new file mode 100644
-index 0000000..1c1120c
+index 0000000..0feaecd
 --- /dev/null
 +++ b/drivers/xen/vgt/interrupt.c
-@@ -0,0 +1,1554 @@
+@@ -0,0 +1,1611 @@
 +/*
 + * vGT interrupt handler
 + *
@@ -25666,6 +26097,7 @@ index 0000000..1c1120c
 +	[PIPE_B_ODD_FIELD] = "Pipe B odd field",
 +	[PIPE_B_EVEN_FIELD] = "Pipe B even field",
 +	[PIPE_B_VBLANK] = "Pipe B vblank",
++	[PIPE_C_VBLANK] = "Pipe C vblank",
 +	[DPST_PHASE_IN] = "DPST phase in event",
 +	[DPST_HISTOGRAM] = "DPST histogram event",
 +	[GSE] = "GSE",
@@ -25727,7 +26159,25 @@ index 0000000..1c1120c
 +	u32 mapped_interrupt = interrupt;
 +	u32 temp;
 +
-+	if (_REG_DEIMR == reg || _REG_DEIER == reg) {
++	if (_REG_DEIMR == reg) {
++		mapped_interrupt |= irq_hstate->pipe_mask;
++		mapped_interrupt |= (irq_hstate->pipe_mask << 5);
++		mapped_interrupt |= (irq_hstate->pipe_mask << 10);
++		// clear the initial mask bit in DEIMR for VBLANKS, so that when pipe mapping
++		// is not valid, physically there are still vblanks generated.
++		mapped_interrupt &= ~((1 << 0) | (1 << 5) | (1 << 10));
++		for (i = 0; i < I915_MAX_PIPES; i++) {
++			if (vgt->pipe_mapping[i] == I915_MAX_PIPES)
++				continue;
++
++			mapped_interrupt &= ~(irq_hstate->pipe_mask <<
++				(vgt->pipe_mapping[i] * 5));
++
++			temp = interrupt >> (i * 5);
++			temp &= irq_hstate->pipe_mask;
++			mapped_interrupt |= temp << (vgt->pipe_mapping[i] * 5);
++		}
++	} else if (_REG_DEIER == reg) {
 +		mapped_interrupt &= ~irq_hstate->pipe_mask;
 +		mapped_interrupt &= ~(irq_hstate->pipe_mask<<5);
 +		mapped_interrupt &= ~(irq_hstate->pipe_mask<<10);
@@ -25791,19 +26241,38 @@ index 0000000..1c1120c
 +	return ier;
 +}
 +
++void recalculate_and_update_imr(struct pgt_device *pdev, vgt_reg_t reg)
++{
++	uint32_t new_imr;
++	unsigned long flags;
++
++	new_imr = vgt_recalculate_mask_bits(pdev, reg);
++	/*
++	 * may optimize by caching the old imr, and then only update
++	 * pReg when AND-ed value changes. but that requires link to
++	 * device specific irq info. So avoid the complexity here
++	 */
++	vgt_get_irq_lock(pdev, flags);
++
++	VGT_MMIO_WRITE(pdev, reg, new_imr);
++	VGT_POST_READ(pdev, reg);
++
++	vgt_put_irq_lock(pdev, flags);
++}
++
 +/* general write handler for all level-1 imr registers */
 +bool vgt_reg_imr_handler(struct vgt_device *vgt,
 +	unsigned int reg, void *p_data, unsigned int bytes)
 +{
 +	uint32_t changed, masked, unmasked;
-+	uint32_t imr = *(u32 *)p_data, new_imr;
++	uint32_t imr = *(u32 *)p_data;
 +	struct pgt_device *pdev = vgt->pdev;
 +	struct vgt_irq_ops *ops = vgt_get_irq_ops(pdev);
 +
-+	vgt_dbg("IRQ: capture IMR write on reg (%x) with val (%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: capture IMR write on reg (%x) with val (%x)\n",
 +		reg, imr);
 +
-+	vgt_dbg("IRQ: old vIMR(%x), pIMR(%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: old vIMR(%x), pIMR(%x)\n",
 +		 __vreg(vgt, reg), VGT_MMIO_READ(pdev, reg));
 +
 +	/* figure out newly masked/unmasked bits */
@@ -25812,26 +26281,40 @@ index 0000000..1c1120c
 +	masked = (__vreg(vgt, reg) & changed) ^ changed;
 +	unmasked = masked ^ changed;
 +
-+	vgt_dbg("IRQ: changed (%x), masked(%x), unmasked (%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: changed (%x), masked(%x), unmasked (%x)\n",
 +		changed, masked, unmasked);
 +
 +	__vreg(vgt, reg) = imr;
 +
-+	if (changed || device_is_reseting(pdev)) {
-+		new_imr = vgt_recalculate_mask_bits(pdev, reg);
-+		/*
-+		 * may optimize by caching the old imr, and then only update
-+		 * pReg when AND-ed value changes. but that requires link to
-+		 * device specific irq info. So avoid the complexity here
-+		 */
-+		VGT_MMIO_WRITE(pdev, reg, new_imr);
-+		VGT_POST_READ(pdev, reg);
-+	}
++	if (changed || device_is_reseting(pdev))
++		recalculate_and_update_imr(pdev, reg);
 +
 +	ops->check_pending_irq(vgt);
-+	vgt_dbg("IRQ: new vIMR(%x), pIMR(%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: new vIMR(%x), pIMR(%x)\n",
 +		 __vreg(vgt, reg), VGT_MMIO_READ(pdev, reg));
 +	return true;
++}
++
++void recalculate_and_update_ier(struct pgt_device *pdev, vgt_reg_t reg)
++{
++	uint32_t new_ier;
++	unsigned long flags;
++
++	new_ier = vgt_recalculate_ier(pdev, reg);
++
++	if (device_is_reseting(pdev) && reg == _REG_DEIER)
++		new_ier &= ~_REGBIT_MASTER_INTERRUPT;
++	/*
++	 * may optimize by caching the old ier, and then only update
++	 * pReg when OR-ed value changes. but that requires link to
++	 * device specific irq info. So avoid the complexity here
++	 */
++	vgt_get_irq_lock(pdev, flags);
++
++	VGT_MMIO_WRITE(pdev, reg, new_ier);
++	VGT_POST_READ(pdev, reg);
++
++	vgt_put_irq_lock(pdev, flags);
 +}
 +
 +/* general write handler for all level-1 ier registers */
@@ -25839,14 +26322,14 @@ index 0000000..1c1120c
 +	unsigned int reg, void *p_data, unsigned int bytes)
 +{
 +	uint32_t changed, enabled, disabled;
-+	uint32_t ier = *(u32 *)p_data, new_ier;
++	uint32_t ier = *(u32 *)p_data;
 +	struct pgt_device *pdev = vgt->pdev;
 +	struct vgt_irq_ops *ops = vgt_get_irq_ops(pdev);
 +
-+	vgt_dbg("IRQ: capture IER write on reg (%x) with val (%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: capture IER write on reg (%x) with val (%x)\n",
 +		reg, ier);
 +
-+	vgt_dbg("IRQ: old vIER(%x), pIER(%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: old vIER(%x), pIER(%x)\n",
 +		 __vreg(vgt, reg), VGT_MMIO_READ(pdev, reg));
 +
 +	if (likely(vgt_track_nest) && !vgt->vgt_id &&
@@ -25861,26 +26344,15 @@ index 0000000..1c1120c
 +	enabled = (__vreg(vgt, reg) & changed) ^ changed;
 +	disabled = enabled ^ changed;
 +
-+	vgt_dbg("vGT_IRQ: changed (%x), enabled(%x), disabled(%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "vGT_IRQ: changed (%x), enabled(%x), disabled(%x)\n",
 +		changed, enabled, disabled);
 +	__vreg(vgt, reg) = ier;
 +
-+	if (changed || device_is_reseting(pdev)) {
-+		new_ier = vgt_recalculate_ier(pdev, reg);
-+
-+		if (device_is_reseting(pdev) && reg == _REG_DEIER)
-+			new_ier &= ~_REGBIT_MASTER_INTERRUPT;
-+		/*
-+		 * may optimize by caching the old ier, and then only update
-+		 * pReg when OR-ed value changes. but that requires link to
-+		 * device specific irq info. So avoid the complexity here
-+		 */
-+		VGT_MMIO_WRITE(pdev, reg, new_ier);
-+		VGT_POST_READ(pdev, reg);
-+	}
++	if (changed || device_is_reseting(pdev))
++		recalculate_and_update_ier(pdev, reg);
 +
 +	ops->check_pending_irq(vgt);
-+	vgt_dbg("IRQ: new vIER(%x), pIER(%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: new vIER(%x), pIER(%x)\n",
 +		 __vreg(vgt, reg), VGT_MMIO_READ(pdev, reg));
 +	return true;
 +}
@@ -25890,7 +26362,7 @@ index 0000000..1c1120c
 +{
 +	vgt_reg_t iir = *(vgt_reg_t *)p_data;
 +
-+	vgt_dbg("IRQ: capture IIR write on reg (%x) with val (%x)\n",
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: capture IIR write on reg (%x) with val (%x)\n",
 +		reg, iir);
 +
 +	/* TODO: need use an atomic operation. Now it's safe due to big lock */
@@ -25898,10 +26370,23 @@ index 0000000..1c1120c
 +	return true;
 +}
 +
-+bool vgt_reg_isr_handler(struct vgt_device *vgt, unsigned int reg,
++bool vgt_reg_isr_read(struct vgt_device *vgt, unsigned int reg,
 +	void *p_data, unsigned int bytes)
 +{
-+	vgt_dbg("IRQ: capture ISR write on reg (%x) with val (%x)." \
++	vgt_reg_t isr_value;
++	if (is_current_display_owner(vgt) && reg == _REG_SDEISR) {
++		isr_value = VGT_MMIO_READ(vgt->pdev, _REG_SDEISR);
++		memcpy(p_data, (char *)&isr_value, bytes);
++		return true;
++	} else {
++		return default_mmio_read(vgt, reg, p_data, bytes);
++	}
++}
++
++bool vgt_reg_isr_write(struct vgt_device *vgt, unsigned int reg,
++	void *p_data, unsigned int bytes)
++{
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: capture ISR write on reg (%x) with val (%x)." \
 +		" Will be ignored!\n", reg, *(vgt_reg_t *)p_data);
 +
 +	return true;
@@ -26123,7 +26608,7 @@ index 0000000..1c1120c
 +	info.domid = vgt->vm_id;
 +	info.addr = *(uint32_t *)(cfg_space + MSI_CAP_ADDRESS);
 +	info.data = *(uint16_t *)(cfg_space + MSI_CAP_DATA);
-+	vgt_dbg("vGT: VM(%d): hvm injections. address (%llx) data(%x)!\n",
++	vgt_dbg(VGT_DBG_IRQ, "vGT: VM(%d): hvm injections. address (%llx) data(%x)!\n",
 +		vgt->vm_id, info.addr, info.data);
 +	r = HYPERVISOR_hvm_op(HVMOP_inject_msi, &info);
 +	if (r < 0)
@@ -26164,7 +26649,7 @@ index 0000000..1c1120c
 +         * TODO: need check 2nd level IMR for render events
 +         */
 +	if (!test_bit(bit, (void*)vgt_vreg(vgt, regbase_to_imr(reg_base)))) {
-+		vgt_dbg("IRQ: set bit (%d) for (%s) for VM (%d)\n",
++		vgt_dbg(VGT_DBG_IRQ, "IRQ: set bit (%d) for (%s) for VM (%d)\n",
 +			bit, vgt_irq_name[event], vgt->vm_id);
 +		set_bit(bit, (void*)vgt_vreg(vgt, regbase_to_iir(reg_base)));
 +
@@ -26776,7 +27261,7 @@ index 0000000..1c1120c
 +	vgt_event_phys_handler_t handler;
 +	struct pgt_device *pdev = hstate->pdev;
 +
-+	ASSERT(spin_is_locked(&pdev->lock));
++	ASSERT(spin_is_locked(&pdev->irq_lock));
 +
 +	for_each_set_bit(bit, iir, VGT_IRQ_BITWIDTH) {
 +		event = info->bit_to_event[bit];
@@ -26815,8 +27300,8 @@ index 0000000..1c1120c
 +	pdev->stat.irq_num++;
 +	pdev->stat.last_pirq = get_cycles();
 +
-+	spin_lock(&pdev->lock);
-+	vgt_dbg("IRQ: receive interrupt (de-%x, gt-%x, pch-%x, pm-%x)\n",
++	spin_lock(&pdev->irq_lock);
++	vgt_dbg(VGT_DBG_IRQ, "IRQ: receive interrupt (de-%x, gt-%x, pch-%x, pm-%x)\n",
 +		VGT_MMIO_READ(pdev, _REG_DEIIR),
 +		VGT_MMIO_READ(pdev, _REG_GTIIR),
 +		VGT_MMIO_READ(pdev, _REG_SDEIIR),
@@ -26828,7 +27313,7 @@ index 0000000..1c1120c
 +
 +	ret = hstate->ops->irq_handler(hstate);
 +	if (ret == IRQ_NONE) {
-+		vgt_dbg("Spurious interrupt received (or shared vector)\n");
++		vgt_dbg(VGT_DBG_IRQ, "Spurious interrupt received (or shared vector)\n");
 +		goto out;
 +	}
 +
@@ -26837,7 +27322,7 @@ index 0000000..1c1120c
 +out:
 +	/* re-enable master interrupt */
 +	VGT_MMIO_WRITE(pdev, _REG_DEIER, de_ier);
-+	spin_unlock(&pdev->lock);
++	spin_unlock(&pdev->irq_lock);
 +
 +	pdev->stat.pirq_cycles += get_cycles() - pdev->stat.last_pirq;
 +
@@ -26915,13 +27400,14 @@ index 0000000..1c1120c
 +	SET_POLICY_DOM0(hstate, AUX_CHENNEL_D);
 +
 +	/* Monitor interfaces are controlled by XenGT driver */
-+	SET_POLICY_NONE(hstate, DP_A_HOTPLUG);
-+	SET_POLICY_NONE(hstate, DP_B_HOTPLUG);
-+	SET_POLICY_NONE(hstate, DP_C_HOTPLUG);
-+	SET_POLICY_NONE(hstate, DP_D_HOTPLUG);
-+	SET_POLICY_NONE(hstate, SDVO_B_HOTPLUG);
-+	SET_POLICY_NONE(hstate, CRT_HOTPLUG);
-+	SET_POLICY_NONE(hstate, GMBUS);
++	SET_POLICY_DOM0(hstate, DP_A_HOTPLUG);
++	SET_POLICY_DOM0(hstate, DP_B_HOTPLUG);
++	SET_POLICY_DOM0(hstate, DP_C_HOTPLUG);
++	SET_POLICY_DOM0(hstate, DP_D_HOTPLUG);
++	SET_POLICY_DOM0(hstate, SDVO_B_HOTPLUG);
++	SET_POLICY_DOM0(hstate, CRT_HOTPLUG);
++
++	SET_POLICY_DOM0(hstate, GMBUS);
 +}
 +
 +static enum hrtimer_restart vgt_dpy_timer_fn(struct hrtimer *data)
@@ -26959,6 +27445,8 @@ index 0000000..1c1120c
 +		kfree(hstate);
 +		return -EINVAL;
 +	}
++
++	spin_lock_init(&pdev->irq_lock);
 +
 +	hstate->pdev = pdev;
 +	//hstate.i915_irq = IRQ_INVALID;
@@ -27104,10 +27592,10 @@ index 0000000..1c1120c
 +EXPORT_SYMBOL(vgt_uninstall_irq);
 diff --git a/drivers/xen/vgt/klog.c b/drivers/xen/vgt/klog.c
 new file mode 100644
-index 0000000..43491a1
+index 0000000..a1f17a6
 --- /dev/null
 +++ b/drivers/xen/vgt/klog.c
-@@ -0,0 +1,719 @@
+@@ -0,0 +1,720 @@
 +/*
 + *  klog - facility to transfer buck kernel log between kernel and userspace
 + *
@@ -27323,6 +27811,7 @@ index 0000000..43491a1
 +{
 +	struct dentry *buf_file;
 +
++	*is_global = 1;
 +	buf_file = debugfs_create_file(filename, mode, parent, buf,
 +					&relay_file_operations);
 +
@@ -27829,10 +28318,10 @@ index 0000000..43491a1
 +
 diff --git a/drivers/xen/vgt/mmio.c b/drivers/xen/vgt/mmio.c
 new file mode 100644
-index 0000000..9b22a04
+index 0000000..cf027cb
 --- /dev/null
 +++ b/drivers/xen/vgt/mmio.c
-@@ -0,0 +1,1137 @@
+@@ -0,0 +1,1184 @@
 +/*
 + * MMIO virtualization framework
 + *
@@ -27894,6 +28383,7 @@ index 0000000..9b22a04
 +
 +	if ((e = vgt_find_mmio_entry(base))) {
 +		hash_del(&e->hlist);
++		kfree(e);
 +	}
 +}
 +
@@ -27953,12 +28443,12 @@ index 0000000..9b22a04
 +bool vgt_register_mmio_handler(unsigned int start, int bytes,
 +	vgt_mmio_read read, vgt_mmio_write write)
 +{
-+	int i, end;
++	int i, j, end;
 +	struct vgt_mmio_entry *mht;
 +
 +	end = start + bytes -1;
 +
-+	vgt_dbg("start=0x%x end=0x%x\n", start, end);
++	vgt_dbg(VGT_DBG_GENERIC, "start=0x%x end=0x%x\n", start, end);
 +
 +	ASSERT((start & 3) == 0);
 +	ASSERT(((end+1) & 3) == 0);
@@ -27967,7 +28457,10 @@ index 0000000..9b22a04
 +		mht = kmalloc(sizeof(*mht), GFP_KERNEL);
 +		if (mht == NULL) {
 +			printk("Insufficient memory in %s\n", __FUNCTION__);
-+			return false;
++			for (j = start; j < i; j += 4) {
++				vgt_del_mmio_entry (j);
++			}
++			BUG();
 +		}
 +		mht->base = i;
 +
@@ -28143,7 +28636,6 @@ index 0000000..9b22a04
 +	int cpu;
 +
 +	t0 = get_cycles();
-+	stat->mmio_rcnt++;
 +
 +	offset = vgt_pa_to_mmio_offset(vgt, pa);
 +
@@ -28152,7 +28644,7 @@ index 0000000..9b22a04
 +		goto err_common_chk;
 +
 +	if (bytes > 4)
-+		vgt_dbg("vGT: capture >4 bytes read to %x\n", offset);
++		vgt_dbg(VGT_DBG_GENERIC,"vGT: capture >4 bytes read to %x\n", offset);
 +
 +	vgt_lock_dev_flags(pdev, cpu, flags);
 +
@@ -28200,6 +28692,7 @@ index 0000000..9b22a04
 +	trace_vgt_mmio_rw(VGT_TRACE_READ, vgt->vm_id, offset, p_data, bytes);
 +
 +	t1 = get_cycles();
++	stat->mmio_rcnt++;
 +	stat->mmio_rcycles += t1 - t0;
 +	return true;
 +err_mmio:
@@ -28229,7 +28722,6 @@ index 0000000..9b22a04
 +	struct vgt_statistics *stat = &vgt->stat;
 +
 +	t0 = get_cycles();
-+	stat->mmio_wcnt++;
 +
 +	/* PPGTT PTE WP comes here too. */
 +	if (pdev->enable_ppgtt && vgt->vm_id != 0 && vgt->ppgtt_initialized) {
@@ -28249,7 +28741,7 @@ index 0000000..9b22a04
 +		goto err_common_chk;
 +
 +	if (bytes > 4)
-+		vgt_dbg("vGT: capture >4 bytes write to %x with val (%lx)\n", offset, *(unsigned long*)p_data);
++		vgt_dbg(VGT_DBG_GENERIC,"vGT: capture >4 bytes write to %x with val (%lx)\n", offset, *(unsigned long*)p_data);
 +/*
 +	if (reg_rdonly(pdev, offset & (~(bytes - 1)))) {
 +		printk("vGT: captured write to read-only reg (%x)\n", offset);
@@ -28297,7 +28789,7 @@ index 0000000..9b22a04
 +	if (reg_mode_ctl(pdev, offset)) {
 +		u32 mask = __vreg(vgt, offset) >> 16;
 +
-+		vgt_dbg("old mode (%x): %x/%x, mask(%x)\n", offset,
++		vgt_dbg(VGT_DBG_GENERIC,"old mode (%x): %x/%x, mask(%x)\n", offset,
 +			__vreg(vgt, offset), __sreg(vgt, offset),
 +			reg_aux_mode_mask(pdev, offset));
 +		/*
@@ -28307,14 +28799,14 @@ index 0000000..9b22a04
 +		reg_aux_mode_mask(pdev, offset) |= mask << 16;
 +		__vreg(vgt, offset) = (old_vreg & ~mask) | (__vreg(vgt, offset) & mask);
 +		__sreg(vgt, offset) = (old_sreg & ~mask) | (__sreg(vgt, offset) & mask);
-+		vgt_dbg("new mode (%x): %x/%x, mask(%x)\n", offset,
++		vgt_dbg(VGT_DBG_GENERIC,"new mode (%x): %x/%x, mask(%x)\n", offset,
 +			__vreg(vgt, offset), __sreg(vgt, offset),
 +			reg_aux_mode_mask(pdev, offset));
 +		//show_mode_settings(vgt->pdev);
 +	}
 +
 +	if (offset == _REG_RCS_UHPTR)
-+		vgt_dbg("vGT: write to UHPTR (%x,%x)\n", __vreg(vgt, offset), __sreg(vgt, offset));
++		vgt_dbg(VGT_DBG_GENERIC,"vGT: write to UHPTR (%x,%x)\n", __vreg(vgt, offset), __sreg(vgt, offset));
 +
 +	reg_set_accessed(pdev, offset);
 +	vgt_unlock_dev_flags(pdev, cpu, flags);
@@ -28322,6 +28814,7 @@ index 0000000..9b22a04
 +
 +	t1 = get_cycles();
 +	stat->mmio_wcycles += t1 - t0;
++	stat->mmio_wcnt++;
 +	return true;
 +err_mmio:
 +	vgt_unlock_dev_flags(pdev, cpu, flags);
@@ -28420,7 +28913,7 @@ index 0000000..9b22a04
 +			if (req->count != 1)
 +				goto err_ioreq_count;
 +
-+			//vgt_dbg("HVM_MMIO_read: target register (%lx).\n",
++			//vgt_dbg(VGT_DBG_GENERIC,"HVM_MMIO_read: target register (%lx).\n",
 +			//	(unsigned long)req->addr);
 +			if (!vgt_emulate_read(vgt, req->addr, &req->data, req->size))
 +				return -EINVAL;
@@ -28430,7 +28923,7 @@ index 0000000..9b22a04
 +			   || (req->addr + sign * req->count * req->size >=
 +				base + vgt->state.bar_size[0]))
 +				goto err_ioreq_range;
-+			//vgt_dbg("HVM_MMIO_read: rep %d target memory %lx, slow!\n",
++			//vgt_dbg(VGT_DBG_GENERIC,"HVM_MMIO_read: rep %d target memory %lx, slow!\n",
 +			//	req->count, (unsigned long)req->addr);
 +
 +			for (i = 0; i < req->count; i++) {
@@ -28444,7 +28937,7 @@ index 0000000..9b22a04
 +				if (gva != NULL && IS_HSW(vgt->pdev))
 +					memcpy(gva, &tmp, req->size);
 +				else
-+					vgt_dbg("vGT: can not write gpa = 0x%lx!!!\n", gpa);
++					vgt_dbg(VGT_DBG_GENERIC,"vGT: can not write gpa = 0x%lx!!!\n", gpa);
 +			}
 +		}
 +	}
@@ -28452,7 +28945,7 @@ index 0000000..9b22a04
 +		if (!req->data_is_ptr) {
 +			if (req->count != 1)
 +				goto err_ioreq_count;
-+			//vgt_dbg("HVM_MMIO_write: target register (%lx).\n", (unsigned long)req->addr);
++			//vgt_dbg(VGT_DBG_GENERIC,"HVM_MMIO_write: target register (%lx).\n", (unsigned long)req->addr);
 +			if (!vgt_emulate_write(vgt, req->addr, &req->data, req->size))
 +				return -EINVAL;
 +		}
@@ -28461,7 +28954,7 @@ index 0000000..9b22a04
 +			    || (req->addr + sign * req->count * req->size >=
 +				base + vgt->state.bar_size[0]))
 +				goto err_ioreq_range;
-+			//vgt_dbg("HVM_MMIO_write: rep %d target memory %lx, slow!\n",
++			//vgt_dbg(VGT_DBG_GENERIC,"HVM_MMIO_write: rep %d target memory %lx, slow!\n",
 +			//	req->count, (unsigned long)req->addr);
 +
 +			for (i = 0; i < req->count; i++) {
@@ -28471,7 +28964,7 @@ index 0000000..9b22a04
 +					memcpy(&tmp, gva, req->size);
 +				else {
 +					tmp = 0;
-+					vgt_dbg("vGT: can not read gpa = 0x%lx!!!\n", gpa);
++					vgt_dbg(VGT_DBG_GENERIC, "vGT: can not read gpa = 0x%lx!!!\n", gpa);
 +				}
 +				if (!vgt_emulate_write(vgt, req->addr + sign * i * req->size, &tmp, req->size))
 +					return -EINVAL;
@@ -28510,7 +29003,7 @@ index 0000000..9b22a04
 +				return -EINVAL;
 +		}
 +		else {
-+			vgt_dbg("VGT: _hvm_pio_emulation read data_ptr %lx\n",
++			vgt_dbg(VGT_DBG_GENERIC,"VGT: _hvm_pio_emulation read data_ptr %lx\n",
 +			(long)ioreq->data);
 +			goto err_data_ptr;
 +#if 0
@@ -28535,7 +29028,7 @@ index 0000000..9b22a04
 +				return -EINVAL;
 +		}
 +		else {
-+			vgt_dbg("VGT: _hvm_pio_emulation write data_ptr %lx\n",
++			vgt_dbg(VGT_DBG_GENERIC,"VGT: _hvm_pio_emulation write data_ptr %lx\n",
 +			(long)ioreq->data);
 +			goto err_data_ptr;
 +#if 0
@@ -28832,7 +29325,7 @@ index 0000000..9b22a04
 +
 +		cnt++;
 +		if (track)
-+			vgt_dbg("reg(%x): size(%x), device(%d), flags(%x), mask(%x), read(%llx), write(%llx)\n",
++			vgt_dbg(VGT_DBG_GENERIC,"reg(%x): size(%x), device(%d), flags(%x), mask(%x), read(%llx), write(%llx)\n",
 +				attr->reg, attr->size, attr->device,
 +				attr->flags,
 +				attr->addr_mask,
@@ -28914,6 +29407,41 @@ index 0000000..9b22a04
 +
 +	__vgt_initial_mmio_space(pdev, vgt_base_reg_info, vgt_get_base_reg_num());
 +
++	/* customize the initial MMIO
++	 * 1, GMBUS status
++	 * 2, Initial port status. 
++	 */
++
++	/* GMBUS2 has an in-use bit as the hw semaphore, and we should recover
++	 * it after the snapshot.
++	 */
++	pdev->initial_mmio_state[REG_INDEX(_REG_PCH_GMBUS2)] &= ~0x8000;
++	VGT_MMIO_WRITE(pdev, _REG_PCH_GMBUS2,
++			VGT_MMIO_READ(pdev, _REG_PCH_GMBUS2) | 0x8000);
++
++	pdev->initial_mmio_state[REG_INDEX(_REG_DDI_BUF_CTL_A)] &=
++				~_DDI_BUFCTL_DETECT_MASK;
++	pdev->initial_mmio_state[REG_INDEX(_REG_TRANS_DDI_FUNC_CTL_A)] &=
++				~_REGBIT_TRANS_DDI_FUNC_ENABLE;
++	pdev->initial_mmio_state[REG_INDEX(_REG_TRANS_DDI_FUNC_CTL_B)] &=
++				~_REGBIT_TRANS_DDI_FUNC_ENABLE;
++	pdev->initial_mmio_state[REG_INDEX(_REG_TRANS_DDI_FUNC_CTL_C)] &=
++				~_REGBIT_TRANS_DDI_FUNC_ENABLE;
++	pdev->initial_mmio_state[REG_INDEX(_REG_TRANS_DDI_FUNC_CTL_EDP)] &=
++				~_REGBIT_TRANS_DDI_FUNC_ENABLE;
++
++	pdev->initial_mmio_state[REG_INDEX(_REG_PIPEACONF)] &=
++				~_REGBIT_PIPE_ENABLE;
++	pdev->initial_mmio_state[REG_INDEX(_REG_PIPEBCONF)] &=
++				~_REGBIT_PIPE_ENABLE;
++	pdev->initial_mmio_state[REG_INDEX(_REG_PIPECCONF)] &=
++				~_REGBIT_PIPE_ENABLE;
++	pdev->initial_mmio_state[REG_INDEX(_REG_PIPE_EDP_CONF)] &=
++				~_REGBIT_PIPE_ENABLE;
++
++	pdev->initial_mmio_state[REG_INDEX(_REG_DP_TP_CTL_E)] &=
++				~_REGBIT_DP_TP_ENABLE;
++
 +	return true;
 +}
 +
@@ -28943,6 +29471,14 @@ index 0000000..9b22a04
 +	__vreg(vgt, _REG_GT_CORE_STATUS) = 0;
 +
 +	/*TODO: init other regs that need different value from pdev */
++
++	if (IS_HSW(vgt->pdev)) {
++		/*
++		 * Clear _REGBIT_FPGA_DBG_RM_NOCLAIM for not causing DOM0
++		 * or Ubuntu HVM complains about unclaimed MMIO registers.
++		 */
++		__vreg(vgt, _REG_FPGA_DBG) &= ~_REGBIT_FPGA_DBG_RM_NOCLAIM;
++	}
 +}
 +
 +/* TODO: figure out any security holes by giving the whole initial state */
@@ -28964,7 +29500,7 @@ index 0000000..9b22a04
 +	for (i = 0; i < vgt->pdev->reg_num; i++) {
 +		if (reg_addr_fix(vgt->pdev, i * REG_SIZE)) {
 +			__sreg(vgt, i) = mmio_g2h_gmadr(vgt, i, __vreg(vgt, i));
-+			vgt_dbg("vGT: address fix for reg (%x): (%x->%x)\n",
++			vgt_dbg(VGT_DBG_GENERIC,"vGT: address fix for reg (%x): (%x->%x)\n",
 +				i, __vreg(vgt, i), __sreg(vgt, i));
 +		}
 +	}
@@ -28972,10 +29508,10 @@ index 0000000..9b22a04
 +}
 diff --git a/drivers/xen/vgt/reg.h b/drivers/xen/vgt/reg.h
 new file mode 100644
-index 0000000..016db3e
+index 0000000..a3e338f
 --- /dev/null
 +++ b/drivers/xen/vgt/reg.h
-@@ -0,0 +1,1763 @@
+@@ -0,0 +1,1818 @@
 +/*
 + * vGT core headers
 + *
@@ -30425,6 +30961,13 @@ index 0000000..016db3e
 +	I915_MAX_PORTS
 +};
 +
++#define VGT_PORT_NAME(p)	\
++	((p) == PORT_A ? "PORT_A" : \
++	((p) == PORT_B ? "PORT_B" : \
++	((p) == PORT_C ? "PORT_C" : \
++	((p) == PORT_D ? "PORT_D" : \
++	((p) == PORT_E ? "PORT_E" : "PORT_X")))))
++
 +#define VGT_PIPE_NAME(p)	\
 +	((p) == PIPE_A ? "Pipe A" : \
 +		((p) == PIPE_B ? "Pipe B" : \
@@ -30450,9 +30993,56 @@ index 0000000..016db3e
 +	VGT_HDMI_B,
 +	VGT_HDMI_C,
 +	VGT_HDMI_D,
-+	VGT_LVDS,
 +	VGT_PORT_MAX
 +};
++
++#define VGT_PORT_TYPE_NAME(p)	\
++        ((p) == VGT_CRT ? "VGT_CRT" : \
++        ((p) == VGT_DP_A ? "VGT_DP_A" : \
++        ((p) == VGT_DP_B ? "VGT_DP_B" : \
++        ((p) == VGT_DP_C ? "VGT_DP_C" : \
++	((p) == VGT_DP_D ? "VGT_DP_D" : \
++	((p) == VGT_HDMI_B ? "VGT_HDMI_B" : \
++	((p) == VGT_HDMI_C ? "VGT_HDMI_C" : \
++	((p) == VGT_HDMI_D ? "VGT_HDMI_D" : "UNKNOWN"))))))))
++
++static inline int port_to_port_type(int port_sel)
++{
++        switch(port_sel) {
++        case PORT_A:
++                return VGT_DP_A;
++        case PORT_B:
++                return VGT_DP_B;
++        case PORT_C:
++                return VGT_DP_C;
++        case PORT_D:
++                return VGT_DP_D;
++        case PORT_E:
++                return VGT_CRT;
++	}
++        return VGT_PORT_MAX;
++}
++
++static inline int port_type_to_port(int port_sel)
++{
++	switch(port_sel) {
++	case VGT_DP_A:
++		return PORT_A;
++	case VGT_DP_B:
++	case VGT_HDMI_B:
++		return PORT_B;
++	case VGT_DP_C:
++	case VGT_HDMI_C:
++		return PORT_C;
++	case VGT_DP_D:
++	case VGT_HDMI_D:
++		return PORT_D;
++	case VGT_CRT:
++		return PORT_E;
++	}
++
++	return I915_MAX_PORTS;
++}
 +
 +/* interrupt related definitions */
 +#define _REG_DEISR	0x44000
@@ -30737,14 +31327,15 @@ index 0000000..016db3e
 +#define _REG_ROW_CHICKEN3			0xE49C
 +
 +#define _REG_FPGA_DBG				0x42300
++#define _REGBIT_FPGA_DBG_RM_NOCLAIM		(1 << 31)
 +
 +#endif	/* _VGT_REG_H_ */
 diff --git a/drivers/xen/vgt/render.c b/drivers/xen/vgt/render.c
 new file mode 100644
-index 0000000..e08c25c
+index 0000000..ab68e3b
 --- /dev/null
 +++ b/drivers/xen/vgt/render.c
-@@ -0,0 +1,1927 @@
+@@ -0,0 +1,1929 @@
 +/*
 + * Render context management
 + *
@@ -30942,7 +31533,7 @@ index 0000000..e08c25c
 +	return true;
 +}
 +
-+static bool idle_rendering_engines(struct pgt_device *pdev, int *id)
++bool idle_rendering_engines(struct pgt_device *pdev, int *id)
 +{
 +	int i;
 +
@@ -31045,7 +31636,7 @@ index 0000000..e08c25c
 +	if (!ring->need_switch)
 +		return;
 +
-+	vgt_dbg("restore ring: [%x, %x, %x, %x] \n", srb->head, srb->tail,
++	vgt_dbg(VGT_DBG_RENDER, "restore ring: [%x, %x, %x, %x] \n", srb->head, srb->tail,
 +		VGT_READ_HEAD(pdev, id),
 +		VGT_READ_TAIL(pdev, id));
 +
@@ -31072,7 +31663,7 @@ index 0000000..e08c25c
 +	 * can further optimize by not switching unused ring.
 +	 */
 +	VGT_POST_READ_HEAD(pdev, id);
-+	vgt_dbg("restore ring: [%x, %x]\n",
++	vgt_dbg(VGT_DBG_RENDER, "restore ring: [%x, %x]\n",
 +		VGT_READ_HEAD(pdev, id),
 +		VGT_READ_TAIL(pdev, id));
 +}
@@ -31248,7 +31839,7 @@ index 0000000..e08c25c
 +		{
 +			__sreg(vgt, reg) = VGT_MMIO_READ(vgt->pdev, reg);
 +			__vreg(vgt, reg) = mmio_h2g_gmadr(vgt, reg, __sreg(vgt, reg));
-+			vgt_dbg("....save mmio (%x) with (%x)\n", reg, __sreg(vgt, reg));
++			vgt_dbg(VGT_DBG_RENDER, "....save mmio (%x) with (%x)\n", reg, __sreg(vgt, reg));
 +		}
 +	}
 +}
@@ -31294,11 +31885,13 @@ index 0000000..e08c25c
 +		 */
 +		//if (!reg_hw_status(vgt->pdev, reg))
 +		VGT_MMIO_WRITE(vgt->pdev, reg, val);
-+		vgt_dbg("....restore mmio (%x) with (%x)\n", reg, val);
++		vgt_dbg(VGT_DBG_RENDER, "....restore mmio (%x) with (%x)\n", reg, val);
++
++		/* Use this post-read as a workaround for a gpu hang issue */
++		res_val = VGT_MMIO_READ(vgt->pdev, reg);
 +
 +		if(!vgt_validate_ctx_switch)
 +			continue;
-+		res_val = VGT_MMIO_READ(vgt->pdev, reg);
 +		if(res_val == val)
 +			continue;
 +		if (!reg_mode_ctl(pdev, reg) ||
@@ -31413,7 +32006,7 @@ index 0000000..e08c25c
 +		return false;
 +	}
 +
-+	vgt_dbg("start vgt ring at 0x%x\n", ring->start);
++	vgt_dbg(VGT_DBG_RENDER, "start vgt ring at 0x%x\n", ring->start);
 +	return true;
 +}
 +
@@ -32243,7 +32836,7 @@ index 0000000..e08c25c
 +	bool forcewake_got = false;
 +
 +	if (!(vgt_ctx_check(pdev) % threshold))
-+		vgt_dbg("vGT: %lldth checks, %lld switches\n",
++		vgt_dbg(VGT_DBG_RENDER, "vGT: %lldth checks, %lld switches\n",
 +			vgt_ctx_check(pdev), vgt_ctx_switch(pdev));
 +	vgt_ctx_check(pdev)++;
 +
@@ -32288,7 +32881,7 @@ index 0000000..e08c25c
 +		goto err;
 +	}
 +
-+	vgt_dbg("vGT: next vgt (%d)\n", next->vgt_id);
++	vgt_dbg(VGT_DBG_RENDER, "vGT: next vgt (%d)\n", next->vgt_id);
 +	
 +
 +	/* variable exported by debugfs */
@@ -32497,7 +33090,7 @@ index 0000000..e08c25c
 +	t0 = get_cycles();
 +	stat->ring_mmio_wcnt++;
 +
-+	vgt_dbg("vGT:ring_mmio_write (0x%x) with val (0x%x)\n", off, *((u32 *)p_data));
++	vgt_dbg(VGT_DBG_RENDER, "vGT:ring_mmio_write (0x%x) with val (0x%x)\n", off, *((u32 *)p_data));
 +	rel_off = off & ( sizeof(vgt_ringbuffer_t) - 1 );
 +
 +	ring_id = tail_to_ring_id (pdev, _tail_reg_(off) );
@@ -32536,8 +33129,8 @@ index 0000000..e08c25c
 +			sring->tail = vring->tail;
 +#endif
 +
-+
-+		vgt_scan_vring(vgt, ring_id);
++		if (vring->ctl & _RING_CTL_ENABLE)
++			vgt_scan_vring(vgt, ring_id);
 +
 +		t1 = get_cycles();
 +		stat->ring_tail_mmio_wcycles += (t1-t0);
@@ -32608,7 +33201,7 @@ index 0000000..e08c25c
 +	 * quantum
 +	 */
 +	if (reg_hw_access(vgt, off)) {
-+		if (rel_off == RB_OFFSET_TAIL)
++		if (rel_off == RB_OFFSET_TAIL && (vring->ctl & _RING_CTL_ENABLE))
 +			vgt_submit_commands(vgt, ring_id);
 +		else
 +			VGT_MMIO_WRITE(pdev, off,
@@ -32674,7 +33267,7 @@ index 0000000..e08c25c
 +}
 diff --git a/drivers/xen/vgt/sched.c b/drivers/xen/vgt/sched.c
 new file mode 100644
-index 0000000..c85df1d
+index 0000000..525fe3a
 --- /dev/null
 +++ b/drivers/xen/vgt/sched.c
 @@ -0,0 +1,864 @@
@@ -33022,7 +33615,7 @@ index 0000000..c85df1d
 +		if (test_bit(ring_id, (void *)vgt->started_rings)
 +				&& !is_vgt_tailq_empty(&vgt->rb_tailq[ring_id])) {
 +			/* check how many tail-writings can be cached */
-+			vgt_dbg("vGT(%d): rb(%d) tailq length(%d)\n",
++			vgt_dbg(VGT_DBG_RENDER, "vGT(%d): rb(%d) tailq length(%d)\n",
 +					vgt->vgt_id, ring_id,
 +					vgt_tailq_len(&vgt->rb_tailq[ring_id]));
 +			return false;
@@ -33245,7 +33838,7 @@ index 0000000..c85df1d
 +	int64_t *ts = &(vgt->sched_info.time_slice);
 +	if (*ts > 0)
 +		return;
-+	vgt_dbg("vgt(%d): allocate tslice %lld\n",
++	vgt_dbg(VGT_DBG_RENDER, "vgt(%d): allocate tslice %lld\n",
 +			vgt->vgt_id,
 +			VGT_DEFAULT_TSLICE);
 +
@@ -33380,7 +33973,7 @@ index 0000000..c85df1d
 +
 +	/* time slice not used up */
 +	if (cur_time < ctx_end_time(cur_vgt)) {
-+		vgt_dbg("vgt(%d): cur_time(%lld), [%lld, %lld]\n",
++		vgt_dbg(VGT_DBG_RENDER, "vgt(%d): cur_time(%lld), [%lld, %lld]\n",
 +				cur_vgt->vgt_id,
 +				cur_time,
 +				ctx_start_time(cur_vgt),
@@ -33389,7 +33982,7 @@ index 0000000..c85df1d
 +		return;
 +	}
 +
-+	vgt_dbg("vgt(%d): tslice used up, cur_time(%lld), ctx_end_time(%lld)\n",
++	vgt_dbg(VGT_DBG_RENDER, "vgt(%d): tslice used up, cur_time(%lld), ctx_end_time(%lld)\n",
 +			cur_vgt->vgt_id,
 +			cur_time,
 +			ctx_end_time(cur_vgt));
@@ -33408,8 +34001,8 @@ index 0000000..c85df1d
 +			return;
 +		}
 +
-+		vgt_dbg("try to switch to vgt(%d), cur_time(%lld)\n", next_vgt->vgt_id, cur_time);
-+		vgt_dbg("vgt(%d): rb wait(%lld) to be empty\n",
++		vgt_dbg(VGT_DBG_RENDER, "try to switch to vgt(%d), cur_time(%lld)\n", next_vgt->vgt_id, cur_time);
++		vgt_dbg(VGT_DBG_RENDER, "vgt(%d): rb wait(%lld) to be empty\n",
 +				cur_vgt->vgt_id,
 +				ctx_rb_empty_delay(cur_vgt));
 +
@@ -33509,7 +34102,7 @@ index 0000000..c85df1d
 +	 * request will be recovered at end of ctx switch.
 +	 */
 +	if (ctx_switch_requested(pdev)) {
-+		vgt_dbg("<%d>: Hold commands in render ctx switch (%d->%d)\n",
++		vgt_dbg(VGT_DBG_RENDER, "<%d>: Hold commands in render ctx switch (%d->%d)\n",
 +			vgt->vm_id, current_render_owner(pdev)->vm_id,
 +			pdev->next_sched_vgt->vm_id);
 +		return;
@@ -33528,7 +34121,7 @@ index 0000000..c85df1d
 +	cmd_nr = get_submission_id(rs, budget, &submission_id);
 +	/* no valid cmd queued */
 +	if (cmd_nr == MAX_CMD_BUDGET) {
-+		vgt_dbg("VM(%d): tail write w/o cmd to submit\n",
++		vgt_dbg(VGT_DBG_RENDER, "VM(%d): tail write w/o cmd to submit\n",
 +			vgt->vm_id);
 +		return;
 +	}
@@ -33544,10 +34137,10 @@ index 0000000..c85df1d
 +}
 diff --git a/drivers/xen/vgt/sysfs.c b/drivers/xen/vgt/sysfs.c
 new file mode 100644
-index 0000000..2a731d5
+index 0000000..c1aad8e
 --- /dev/null
 +++ b/drivers/xen/vgt/sysfs.c
-@@ -0,0 +1,627 @@
+@@ -0,0 +1,1166 @@
 +/*
 + * vGT sysfs interface (the original code comes from samples/kobject-example.c)
 + *
@@ -33701,33 +34294,6 @@ index 0000000..2a731d5
 +	return ret;
 +}
 +
-+static ssize_t vgt_display_pointer_store(struct kobject *kobj, struct kobj_attribute *attr,
-+			const char *buf, size_t count)
-+{
-+	int vmid;
-+
-+	if (sscanf(buf, "%du", &vmid) != 1)
-+		return -EINVAL;
-+
-+	mutex_lock(&vgt_sysfs_lock);
-+	vgt_set_display_pointer(vmid);
-+	mutex_unlock(&vgt_sysfs_lock);
-+
-+	return count;
-+}
-+
-+static ssize_t vgt_display_pointer_show(struct kobject *kobj, struct kobj_attribute *attr,
-+			char *buf)
-+{
-+	ssize_t ret;
-+
-+	mutex_lock(&vgt_sysfs_lock);
-+	ret = vgt_get_display_pointer(buf);
-+	mutex_unlock(&vgt_sysfs_lock);
-+
-+	return ret;
-+}
-+
 +static ssize_t vgt_ctx_switch_store(struct kobject *kobj, struct kobj_attribute *attr,
 +			const char *buf, size_t count)
 +{
@@ -33845,8 +34411,6 @@ index 0000000..2a731d5
 +	__ATTR(display_owner, 0660, vgt_display_owner_show, vgt_display_owner_store);
 +static struct kobj_attribute foreground_vm_ctrl_attrs =
 +	__ATTR(foreground_vm, 0660, vgt_foreground_vm_show, vgt_foreground_vm_store);
-+static struct kobj_attribute display_pointer_attrs =
-+	__ATTR(display_pointer, 0660, vgt_display_pointer_show, vgt_display_pointer_store);
 +
 +static struct kobj_attribute hot_plug_event_attrs =
 +	__ATTR(virtual_event, 0660, vgt_hot_plug_reader, vgt_hot_plug_trigger);
@@ -33867,13 +34431,504 @@ index 0000000..2a731d5
 +	&create_vgt_instance_attrs.attr,
 +	&display_owner_ctrl_attrs.attr,
 +	&foreground_vm_ctrl_attrs.attr,
-+	&display_pointer_attrs.attr,
 +	&hot_plug_event_attrs.attr,
 +	&ctx_switch_attrs.attr,
 +	&validate_ctx_switch_attrs.attr,
 +	&dpy_switch_attrs.attr,
 +	&available_res_attrs.attr,
 +	NULL,	/* need to NULL terminate the list of attributes */
++};
++
++#define kobj_to_port(kobj) container_of((kobj), struct gt_port, kobj)
++#define kobj_to_vgt(xkobj) container_of((xkobj), struct vgt_device, kobj)
++
++static ssize_t vgt_port_edid_show(struct file *filp, struct kobject *kobj,
++				  struct bin_attribute *attr, char *buf, loff_t off,
++				  size_t count)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	vgt_edid_data_t *edid;
++
++	if (off >= EDID_SIZE) {
++		return 0;
++	}
++
++	if (off + count > EDID_SIZE) {
++		count = EDID_SIZE - off;
++	}
++
++	mutex_lock(&vgt_sysfs_lock);
++
++	edid = port->edid;
++
++	if (edid && edid->data_valid) {
++		memcpy(buf, edid->edid_block + off, count);
++	} else {
++		count = 0;
++	}
++
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++static ssize_t
++vgt_port_edid_store(struct file* filp, struct kobject *kobj,
++		    struct bin_attribute *bin_attr,
++		    char *buf, loff_t off, size_t count)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	int write_count = count;
++	char *dest;
++
++	if (!count || off < 0 || (off & 3))
++		return count;
++
++	if (off >= bin_attr->size)
++		return -EINVAL;
++
++	if (off + count > bin_attr->size)
++		write_count = bin_attr->size - off;
++
++	mutex_lock(&vgt_sysfs_lock);
++
++	if (port->cache.edid == NULL) {
++		port->cache.edid = kmalloc(sizeof(vgt_edid_data_t),
++			      GFP_ATOMIC);
++	}
++
++	if (port->cache.edid == NULL) {
++		mutex_unlock(&vgt_sysfs_lock);
++		return -ENOMEM;
++	}
++
++	dest = port->cache.edid->edid_block + off;
++	memcpy(dest, buf, write_count);
++	if (off + write_count == bin_attr->size &&
++		vgt_is_edid_valid(port->cache.edid->edid_block)) {
++		
++		// customize the EDID to remove extended EDID block.
++		u8 *block = port->cache.edid->edid_block;
++		if (block[0x7e]) {
++			block[0x7f] += block[0x7e];
++			block[0x7e] = 0;
++		}
++		port->cache.edid->data_valid = true;
++		port->cache.valid = true;
++	}
++
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++static inline int ctoi(char chr)
++{
++    return (chr >= '0' && chr <= '9' ? chr - '0' :
++		(chr >= 'a' && chr <= 'f' ? chr - 'a' + 10 :
++		(chr >= 'A' && chr <= 'F' ? chr - 'A' + 10 :
++			-1)));
++}
++
++static ssize_t
++vgt_port_edid_text_store(struct kobject *kobj, struct kobj_attribute *attr,
++                        const char *buf, size_t count)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	int i;
++	char *dest;
++
++	if (count != (EDID_SIZE << 1))
++		return -EINVAL;
++
++	mutex_lock(&vgt_sysfs_lock);
++
++	if (port->cache.edid == NULL) {
++		port->cache.edid = kmalloc(sizeof(vgt_edid_data_t),
++			      GFP_ATOMIC);
++	}
++
++	if (port->cache.edid == NULL) {
++		return -ENOMEM;
++	}
++
++	port->cache.edid->data_valid = false;
++
++	dest = port->cache.edid->edid_block;
++
++	for (i = 0; i < count; i += 2) {
++		int hi = ctoi(buf[i]);
++		int lo  = ctoi(buf[i + 1]);
++		if (hi < 0 || lo < 0) {
++			vgt_warn("invalid injected EDID!\n");
++			break;
++		}
++
++		*dest= (hi << 4) + lo;
++		dest++;
++	}
++
++	if ((i == count) && vgt_is_edid_valid(port->cache.edid->edid_block)) {
++		// customize the EDID to remove extended EDID block.
++		u8 *block = port->cache.edid->edid_block;
++		if (block[0x7e]) {
++			block[0x7f] += block[0x7e];
++			block[0x7e] = 0;
++		}
++		port->cache.edid->data_valid = true;
++		port->cache.valid = true;
++	}
++
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++
++static bool is_port_connected(struct gt_port *port)
++{
++	if (port && port->edid && port->edid->data_valid) {
++		return true;
++	}
++	return false;
++}
++
++static ssize_t vgt_pport_connection_show(struct kobject *kobj, struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct pgt_device *pgt = &default_device;
++	ssize_t buf_len;
++	int i;
++
++        for (i = 0; i < I915_MAX_PORTS; i++) {
++                if (strcmp(VGT_PORT_NAME(i), kobj->name) == 0) {
++                        break;
++                }
++        }
++
++	if (i >= I915_MAX_PORTS) {
++		return 0;
++	}
++
++	mutex_lock(&vgt_sysfs_lock);
++
++	buf_len = sprintf(buf, "%s\n", is_port_connected(&(pgt->ports[i])) ?
++			"connected" : "disconnected");
++
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return buf_len;
++}
++
++static bool is_pport_present(struct pgt_device *pgt, struct gt_port *port)
++{
++
++	bool found = false;
++
++	switch (port->physcal_port) {
++	case PORT_A:
++		found = VGT_MMIO_READ(pgt, _REG_DDI_BUF_CTL_A) & _DDI_BUFCTL_DETECT_MASK;
++		break;
++	case PORT_B:
++		found = VGT_MMIO_READ(pgt,_REG_SFUSE_STRAP) & _REGBIT_SFUSE_STRAP_B_PRESENTED;
++		break;
++	case PORT_C:
++		found = VGT_MMIO_READ(pgt,_REG_SFUSE_STRAP) & _REGBIT_SFUSE_STRAP_C_PRESENTED;
++		break;
++	case PORT_D:
++		found = VGT_MMIO_READ(pgt,_REG_SFUSE_STRAP) & _REGBIT_SFUSE_STRAP_D_PRESENTED;
++		break;
++	case PORT_E:
++		found = true;
++		break;
++	default:
++		found = false;
++		break;
++	}
++
++	return found;
++
++}
++
++static ssize_t vgt_pport_presnece_show(struct kobject *kobj, struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct pgt_device *pgt = &default_device;
++
++	ssize_t buf_len;
++	int i;
++
++        for (i = 0; i < I915_MAX_PORTS; i++) {
++                if (strcmp(VGT_PORT_NAME(i), kobj->name) == 0) {
++                        break;
++                }
++        }
++
++	if (i >= I915_MAX_PORTS) {
++		return 0;
++	}
++
++	mutex_lock(&vgt_sysfs_lock);
++
++	buf_len = sprintf(buf, "%s\n", is_pport_present(pgt, &(pgt->ports[i])) ?
++			"present" : "unpresent");
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return buf_len;
++}
++
++static ssize_t vgt_pport_connection_store(struct kobject *kobj, struct kobj_attribute *attr,
++			const char *buf, size_t count)
++{
++	bool is_connected = false;
++
++	mutex_lock(&vgt_sysfs_lock);
++	if (strncmp("connect", buf, 7) == 0) {
++			is_connected = true;
++	} else if (strncmp("disconnect", buf, 10) == 0) {
++			is_connected = false;
++	}
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++static ssize_t vgt_vport_connection_show(struct kobject *kobj, struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	ssize_t buf_len;
++
++	mutex_lock(&vgt_sysfs_lock);
++	
++	buf_len = sprintf(buf, "%s\n", is_port_connected(port) ? "connected" : "disconnected");
++
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return buf_len;
++}
++
++static ssize_t vgt_vport_connection_store(struct kobject *kobj, struct kobj_attribute *attr,
++                        const char *buf, size_t count)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	struct vgt_device *vgt = kobj_to_vgt(kobj->parent);
++	enum vgt_event_type event;
++	bool flush_request = false;
++	bool hotplug_request = false;
++	int cpu;
++	bool is_current_connected = is_port_connected(port);
++
++	mutex_lock(&vgt_sysfs_lock);
++	vgt_lock_dev(vgt->pdev, cpu);
++
++	if (strncmp("connect", buf, 7) == 0) {
++		vgt_info("Monitor detection: %s  is connected\n", VGT_PORT_NAME(port->physcal_port));
++		if (!(port->cache.valid && port->cache.edid &&
++				port->cache.edid->data_valid))
++			vgt_warn("Request to connect a monitor but new monitor "
++				"setting is not ready. Will be ignored\n");
++		else if (!is_current_connected) {
++			flush_request = hotplug_request = true;
++		} else if (is_current_connected &&
++			memcmp(port->edid->edid_block, port->cache.edid->edid_block, EDID_SIZE)) {
++			flush_request = hotplug_request = true;
++		}
++	} else if (strncmp("disconnect", buf, 10) == 0) {
++		vgt_info("Monitor detection: %s  is disconnected\n", VGT_PORT_NAME(port->physcal_port));
++		if (is_current_connected) {
++			if (port->cache.edid)
++				port->cache.edid->data_valid = false;
++			port->cache.valid = true;
++			flush_request = hotplug_request = true;
++		}
++	} else if (strncmp("flush", buf, 5) == 0) {
++		flush_request = true;
++	} else {
++		vgt_warn("Input string not recognized: %s\n", buf);
++	}
++
++	if (flush_request)
++		vgt_flush_port_info(vgt, port);
++
++	if (hotplug_request) {
++		enum vgt_port port_type = vgt_get_port(vgt, port);
++		switch (port_type) {
++		case PORT_A:
++			event = EVENT_MAX; break;
++		case PORT_B:
++			event = DP_B_HOTPLUG; break;
++		case PORT_C:
++			event = DP_C_HOTPLUG; break;
++		case PORT_D:
++			event = DP_D_HOTPLUG; break;
++		case PORT_E:
++			event = CRT_HOTPLUG; break;
++		default:
++			event = EVENT_MAX;
++			vgt_err("Invalid port(%s) for hotplug!\n",
++				VGT_PORT_NAME(port_type));
++		}
++		if (event != EVENT_MAX)
++			vgt_trigger_virtual_event(vgt, event);
++	}
++
++	vgt_unlock_dev(vgt->pdev, cpu);
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++static ssize_t vgt_port_type_show(struct kobject *kobj, struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	ssize_t buf_len;
++
++	mutex_lock(&vgt_sysfs_lock);
++	buf_len = sprintf(buf, "%s\n", VGT_PORT_TYPE_NAME(port->type));
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return buf_len;
++}
++
++static ssize_t vgt_port_type_store(struct kobject *kobj, struct kobj_attribute *attr,
++				   const char *buf, size_t count)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	int portIndex;
++
++
++	mutex_lock(&vgt_sysfs_lock);
++	if (sscanf(buf, "%d", &portIndex) != 1) {
++		mutex_unlock(&vgt_sysfs_lock);
++		return -EINVAL;
++	}
++
++	port->cache.type = VGT_CRT + portIndex;
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++static ssize_t vgt_vport_port_override_show(struct kobject *kobj, struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	ssize_t buf_len;
++
++	mutex_lock(&vgt_sysfs_lock);
++	buf_len = sprintf(buf, "%s\n", VGT_PORT_NAME(port->port_override));
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return buf_len;
++}
++
++static ssize_t vgt_vport_port_override_store(struct kobject *kobj, struct kobj_attribute *attr,
++                        const char *buf, size_t count)
++{
++	struct gt_port *port = kobj_to_port(kobj);
++	enum vgt_port override;
++
++	if (strncmp("PORT_A", buf, 6) == 0) {
++		override = PORT_A;
++	} else if (strncmp("PORT_B", buf, 6) == 0) {
++		override = PORT_B;
++	} else if (strncmp("PORT_C", buf, 6) == 0) {
++		override  = PORT_C;
++	} else if (strncmp("PORT_D", buf, 6) == 0) {
++		override  = PORT_D;
++	} else if (strncmp("PORT_E", buf, 6) == 0) {
++		override = PORT_E;
++	} else {
++		return -EINVAL;
++	}
++
++	mutex_lock(&vgt_sysfs_lock);
++
++	port->cache.port_override = override;
++	port->cache.valid = true;
++
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return count;
++}
++
++static ssize_t vgt_vport_pipe_show(struct kobject *kobj, struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct gt_port *port_ptr = kobj_to_port(kobj);
++	struct vgt_device *vgt = kobj_to_vgt(kobj->parent);
++	enum vgt_port port;
++	ssize_t buf_len;
++	int cpu;
++
++	mutex_lock(&vgt_sysfs_lock);
++	vgt_lock_dev(vgt->pdev, cpu);
++
++	port = vgt_get_port(vgt, port_ptr);
++	if (port == PORT_A)
++		buf_len = sprintf(buf, "PIPE_EDP\n");
++	else {
++		enum vgt_pipe pipe = vgt_get_pipe_from_port(vgt, port);
++		buf_len = sprintf(buf, "%s\n", VGT_PIPE_NAME(pipe));
++	}
++
++	vgt_unlock_dev(vgt->pdev, cpu);
++	mutex_unlock(&vgt_sysfs_lock);
++
++	return buf_len;
++}
++
++static struct kobj_attribute vport_connection_attrs =
++	__ATTR(connection, 0660, vgt_vport_connection_show, vgt_vport_connection_store);
++
++static struct kobj_attribute vport_type_attrs =
++	__ATTR(type, 0660, vgt_port_type_show, vgt_port_type_store);
++
++static struct kobj_attribute vport_port_override_attrs =
++	__ATTR(port_override, 0660, vgt_vport_port_override_show, vgt_vport_port_override_store);
++
++static struct kobj_attribute vport_pipe_attrs =
++	__ATTR(pipe, 0440, vgt_vport_pipe_show, NULL);
++
++// EDID text mode input interface for the convenience of testing
++static struct kobj_attribute vport_edid_text_attrs =
++	__ATTR(edid_text, 0660, NULL, vgt_port_edid_text_store);
++
++static struct attribute *vgt_vport_attrs[] = {
++	&vport_connection_attrs.attr,
++	&vport_type_attrs.attr,
++	&vport_port_override_attrs.attr,
++	&vport_pipe_attrs.attr,
++	&vport_edid_text_attrs.attr,
++	NULL,
++};
++
++static struct bin_attribute port_edid_attr = {
++        .attr = {
++                .name = "edid",
++                .mode = 0660
++        },
++        .size = EDID_SIZE,
++        .read = vgt_port_edid_show,
++        .write = vgt_port_edid_store,
++};
++
++static struct kobj_attribute pport_type_attrs =
++	__ATTR(type, 0660, vgt_port_type_show, vgt_port_type_store);
++
++static struct kobj_attribute pport_connection_attrs =
++	__ATTR(connection, 0660, vgt_pport_connection_show, vgt_pport_connection_store);
++
++static struct kobj_attribute pport_presence_attrs =
++	__ATTR(presence, 0440, vgt_pport_presnece_show, NULL);
++
++static struct attribute *vgt_pport_attrs[] = {
++	&pport_connection_attrs.attr,
++	&pport_type_attrs.attr,
++	&pport_presence_attrs.attr,
++	NULL,
 +};
 +
 +/* copied code from here */
@@ -33908,8 +34963,6 @@ index 0000000..2a731d5
 +
 +
 +/* copied code end */
-+
-+#define kobj_to_vgt(kobj) container_of((kobj), struct vgt_device, kobj)
 +
 +static ssize_t vgt_id_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 +{
@@ -33991,6 +35044,18 @@ index 0000000..2a731d5
 +	.release	= vgt_kobj_release,
 +	.sysfs_ops  = &vgt_kobj_sysfs_ops,
 +	.default_attrs = vgt_ctrl_attrs,
++};
++
++static struct kobj_type vgt_vport_ktype = {
++	.release	= vgt_kobj_release,
++	.sysfs_ops	= &vgt_kobj_sysfs_ops,
++	.default_attrs	= vgt_vport_attrs,
++};
++
++static struct kobj_type vgt_pport_ktype = {
++	.release	= vgt_kobj_release,
++	.sysfs_ops	= &vgt_kobj_sysfs_ops,
++	.default_attrs	= vgt_pport_attrs,
 +};
 +
 +static ssize_t
@@ -34075,7 +35140,7 @@ index 0000000..2a731d5
 +
 +static int vgt_add_state_sysfs(vgt_params_t vp)
 +{
-+	int retval;
++	int retval, i;
 +	struct vgt_device *vgt;
 +	/*
 +	* Create a simple kobject located under /sys/kernel/
@@ -34110,17 +35175,56 @@ index 0000000..2a731d5
 +		kobject_put(&vgt->kobj);
 +	}
 +
++	for (i = 0; i < I915_MAX_PORTS; i++) {
++		retval = kobject_init_and_add(&vgt->ports[i].kobj,
++					      &vgt_vport_ktype,
++					      &vgt->kobj,
++					      "%s",
++					      VGT_PORT_NAME(i));
++
++		if (retval) {
++			printk(KERN_WARNING
++			       "%s: vgt vport kobject add error: %d\n",
++			       __func__, retval);
++			retval = -EINVAL;
++			goto kobj_fail;
++		}
++
++		retval = sysfs_create_bin_file(&vgt->ports[i].kobj,
++					    &port_edid_attr);
++		if (retval < 0) {
++			retval = -EINVAL;
++			goto kobj_fail;
++		}
++	}
++
++	if ((propagate_monitor_to_guest) && (vgt->vm_id != 0)) {
++		vgt_detect_display(vgt, -1);
++	}
++
++	return retval;
++
++kobj_fail:
++	for (; i >= 0; i++) {
++		kobject_put(&vgt->ports[i].kobj);
++	}
++	kobject_put(&vgt->kobj);
 +	return retval;
 +}
 +
 +static int vgt_del_state_sysfs(vgt_params_t vp)
 +{
 +	struct vgt_device *vgt;
++	int i;
 +
 +	vp.vm_id = -vp.vm_id;
 +	vgt = vmid_2_vgt_device(vp.vm_id);
 +	if (!vgt)
 +		return -ENODEV;
++
++	for (i = 0; i < I915_MAX_PORTS; i++) {
++		kobject_put(&vgt->ports[i].kobj);
++	}
 +
 +	kobject_put(&vgt->kobj);
 +
@@ -34131,7 +35235,8 @@ index 0000000..2a731d5
 +
 +int vgt_init_sysfs(struct pgt_device *pdev)
 +{
-+	int ret;
++	struct pgt_device *pgt = &default_device;
++	int ret, i = 0;
 +
 +	vgt_kset = kset_create_and_add("vgt", NULL, kernel_kobj);
 +	if (!vgt_kset) {
@@ -34159,9 +35264,36 @@ index 0000000..2a731d5
 +		goto kobj_fail;
 +	}
 +
++	for (i = 0; i < I915_MAX_PORTS; i++) {
++		ret = kobject_init_and_add(&pgt->ports[i].kobj,
++					      &vgt_pport_ktype,
++					      vgt_ctrl_kobj,
++					      "%s",
++					      VGT_PORT_NAME(i));
++
++		if (ret) {
++			printk(KERN_WARNING
++			       "%s: vgt pport kobject add error: %d\n",
++			       __func__, ret);
++			ret = -EINVAL;
++			kobject_put(&pgt->ports[i].kobj);
++			goto kobj_fail;
++		}
++
++		ret = sysfs_create_bin_file(&pgt->ports[i].kobj,
++					    &port_edid_attr);
++		if (ret < 0) {
++			ret = -EINVAL;
++			goto kobj_fail;
++		}
++	}
++
 +	return 0;
 +
 +kobj_fail:
++	for (; i > 0; i--) {
++		kobject_put(&pgt->ports[i - 1].kobj);
++	}
 +	kobject_put(vgt_ctrl_kobj);
 +ctrl_fail:
 +	kset_unregister(vgt_kset);
@@ -34306,10 +35438,10 @@ index 0000000..8573eb3
 +#include <trace/define_trace.h>
 diff --git a/drivers/xen/vgt/utility.c b/drivers/xen/vgt/utility.c
 new file mode 100644
-index 0000000..8806ef3
+index 0000000..01bcd81
 --- /dev/null
 +++ b/drivers/xen/vgt/utility.c
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,648 @@
 +/*
 + * Various utility helpers.
 + *
@@ -34481,6 +35613,7 @@ index 0000000..8806ef3
 +{
 +	int i;
 +	char *ip_va;
++	u32 start;
 +	struct vgt_device *vgt = current_render_owner(pdev);
 +
 +	if (!vgt) {
@@ -34488,18 +35621,29 @@ index 0000000..8806ef3
 +		return;
 +	}
 +
-+	printk("Batch buffer contents: \n");
-+	for (i = -bytes; i < bytes; i += 4) {
-+		ip_va = vgt_gma_to_va(vgt, addr+i, ppgtt);
++	if (addr < bytes) {
++		bytes *= 2;
++		start = 0;
++	} else if ((addr + bytes) >= (1 << 31)) {
++		bytes *= 2;
++		start = (1 << 31) - bytes;
++	} else {
++		start = addr - bytes;
++		bytes *= 2;
++	}
 +
-+		if (!((i + bytes) % 32))
-+			printk("\n[%08x]:", addr+i);
++	printk("Batch buffer contents: \n");
++	for (i = 0; i < bytes; i += 4) {
++		ip_va = vgt_gma_to_va(vgt, start + i, ppgtt);
++
++		if (!(i % 32))
++			printk("\n[%08x]:", start + i);
 +
 +		if (ip_va == NULL)
 +			printk(" %8s", "N/A");
 +		else
 +			printk(" %08x", *((u32 *)ip_va));
-+		if (!i)
++		if (start + i == addr)
 +			printk("(*)");
 +	}
 +	printk("\n");
@@ -34563,14 +35707,21 @@ index 0000000..8806ef3
 +	off = WRAP_OFF(p_head - 8, ring_len);
 +	cur = (u32*)(p_contents + off);
 +	if ((*cur & 0xfff00000) == 0x18800000 && vgt) {
++		int ppgtt = (*cur & _CMDBIT_BB_START_IN_PPGTT);
++
++		if (ppgtt && !vgt->ppgtt_initialized) {
++			printk("Batch buffer in PPGTT with PPGTT disabled?\n");
++			return;
++		}
++
 +		printk("Hang in (%s) batch buffer (%x)\n",
-+			(*cur & _CMDBIT_BB_START_IN_PPGTT) ? "PPGTT" : "GTT",
++			ppgtt ? "PPGTT" : "GTT",
 +			*(cur + 1));
 +
 +		show_batchbuffer(pdev,
 +			VGT_MMIO_READ(pdev, VGT_ACTHD(ring_id)),
-+			(*cur & _CMDBIT_BB_START_IN_PPGTT),
-+			bytes);
++			bytes,
++			ppgtt);
 +	}
 +}
 +
@@ -34622,11 +35773,11 @@ index 0000000..8806ef3
 +	pci_write_config_dword(dev, bar_off, 0xFFFFFFFF);
 +
 +	pci_read_config_dword(dev, bar_off, (uint32_t *)&bar_size);
-+	vgt_dbg("read back bar_size %lx\n", bar_size);
++	vgt_dbg(VGT_DBG_GENERIC, "read back bar_size %lx\n", bar_size);
 +	bar_size &= ~0xf; /* bit 4-31 */
-+	vgt_dbg("read back bar_size1 %lx\n", bar_size);
++	vgt_dbg(VGT_DBG_GENERIC, "read back bar_size1 %lx\n", bar_size);
 +	bar_size = 1 << find_first_bit(&bar_size, BITS_PER_LONG);
-+	vgt_dbg("read back bar_size2 %lx\n", bar_size);
++	vgt_dbg(VGT_DBG_GENERIC, "read back bar_size2 %lx\n", bar_size);
 +
 +	pci_write_config_dword(dev, bar_off, bar_s);
 +
@@ -34675,7 +35826,7 @@ index 0000000..8806ef3
 +	int i;
 +
 +	for (i = 0; i < ARRAY_SIZE(addr); i++)
-+		vgt_dbg("GMADR: 0x08%x, GTT INDEX: %x, GTT VALUE: %x\n",
++		vgt_dbg(VGT_DBG_MEM, "GMADR: 0x08%x, GTT INDEX: %x, GTT VALUE: %x\n",
 +			addr[i], GTT_INDEX(pdev, addr[i]),
 +			vgt_read_gtt(pdev, GTT_INDEX(pdev, addr[i])));
 +}
@@ -34721,6 +35872,25 @@ index 0000000..8806ef3
 +	}
 +}
 +
++void vgt_clear_gtt(struct vgt_device *vgt)
++{
++	uint32_t index;
++	uint32_t offset;
++	uint32_t num_entries;
++
++	index = vgt_visible_gm_base(vgt) >> PAGE_SHIFT;
++	num_entries = vgt_aperture_sz(vgt) >> PAGE_SHIFT;
++	for (offset = 0; offset < num_entries; offset++){
++		vgt_write_gtt(vgt->pdev, index+offset, vgt->pdev->dummy_pte);
++	}
++
++	index = vgt_hidden_gm_base(vgt) >> PAGE_SHIFT;
++	num_entries = vgt_hidden_gm_sz(vgt) >> PAGE_SHIFT;
++	for (offset = 0; offset < num_entries; offset++){
++		vgt_write_gtt(vgt->pdev, index+offset, vgt->pdev->dummy_pte);
++	}
++}
++
 +int setup_gtt(struct pgt_device *pdev)
 +{
 +	struct page *dummy_page;
@@ -34750,6 +35920,7 @@ index 0000000..8806ef3
 +
 +	pte = dma_addr_to_pte_uc(pdev, dma_addr);
 +	printk("....dummy page (0x%llx, 0x%llx)\n", page_to_phys(dummy_page), dma_addr);
++	pdev->dummy_pte = pte;
 +
 +	/* for debug purpose */
 +	memset(pfn_to_kaddr(page_to_pfn(dummy_page)), 0x77, PAGE_SIZE);
@@ -34758,9 +35929,9 @@ index 0000000..8806ef3
 +	for (i = 0; i < gm_pages(pdev); i++)
 +		vgt_write_gtt(pdev, i, pte);
 +
-+	vgt_dbg("content at 0x0: %lx\n", *(unsigned long *)((char *)phys_aperture_vbase(pdev) + 0x0));
-+	vgt_dbg("content at 0x64000: %lx\n", *(unsigned long *)((char *)phys_aperture_vbase(pdev) + 0x64000));
-+	vgt_dbg("content at 0x8064000: %lx\n", *(unsigned long *)((char *)phys_aperture_vbase(pdev) + 0x8064000));
++	vgt_dbg(VGT_DBG_MEM, "content at 0x0: %lx\n", *(unsigned long *)((char *)phys_aperture_vbase(pdev) + 0x0));
++	vgt_dbg(VGT_DBG_MEM, "content at 0x64000: %lx\n", *(unsigned long *)((char *)phys_aperture_vbase(pdev) + 0x64000));
++	vgt_dbg(VGT_DBG_MEM, "content at 0x8064000: %lx\n", *(unsigned long *)((char *)phys_aperture_vbase(pdev) + 0x8064000));
 +
 +	check_gtt(pdev);
 +
@@ -34779,7 +35950,7 @@ index 0000000..8806ef3
 +		/* need a DMA flag? */
 +		page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 +		if (!page) {
-+			vgt_dbg("vGT: Failed to create page for setup_gtt!\n");
++			vgt_dbg(VGT_DBG_MEM, "vGT: Failed to create page for setup_gtt!\n");
 +			ret = -ENOMEM;
 +			goto err_out;
 +		}
@@ -34802,7 +35973,7 @@ index 0000000..8806ef3
 +		vgt_write_gtt(pdev, index + i, pte);
 +
 +		if (!(i % 1024))
-+			vgt_dbg("vGT: write GTT-%x phys: %llx, dma: %llx\n",
++			vgt_dbg(VGT_DBG_MEM, "vGT: write GTT-%x phys: %llx, dma: %llx\n",
 +				index + i, page_to_phys(page), dma_addr);
 +	}
 +
@@ -34855,23 +36026,76 @@ index 0000000..8806ef3
 +			pdev->saved_fences[i], 8);
 +}
 +
++static void _hex_dump(const char *data, size_t size)
++{
++	char buf[74];
++	size_t offset;
++	int line;
++
++	for (line = 0; line < ((size + 0xF) / 0x10); line++) {
++		int byte;
++
++		memset(buf, ' ', sizeof(buf));
++		buf[73] = '\0';
++		offset = 0;
++
++		offset += snprintf(buf + offset, 74 - offset, "%07x: ", line * 0x10);
++
++		for (byte = 0; byte < 0x10; byte++) {
++			if (!(byte & 0x1)) {
++				offset += snprintf(buf + offset, 74 - offset, " ");
++			}
++
++			if (((line * 0x10) + byte) >= size) {
++				offset += snprintf(buf + offset, 74 - offset, "  ");
++			} else {
++				offset += snprintf(buf + offset, 74 - offset, "%02x",
++					       data[byte + (line * 0x10)] & 0xFF);
++			}
++		}
++		
++		offset += snprintf(buf + offset, 74 - offset, "  ");
++
++		for (byte = 0; byte < 0x10; byte++) {
++			if (data[byte + (line * 0x10)] >= 0x20 &&
++			    data[byte + (line * 0x10)] <= 0x7E) {
++				offset += snprintf(buf + offset, 74 - offset, "%c",
++				    data[byte + (line * 0x10)] & 0xFF);
++			} else {
++				offset += snprintf(buf + offset, 74 - offset, ".");
++			}
++		}
++
++		offset += snprintf(buf + offset, 74 - offset, "\n");
++		printk(buf);
++	}
++}
++
++void vgt_print_edid(vgt_edid_data_t *edid)
++{
++	if (edid && edid->data_valid) {
++		_hex_dump(edid->edid_block, EDID_SIZE);
++	} else {
++		printk("EDID is not available!\n");
++	}
++
++	return;
++}
++
 +void vgt_print_dpcd(struct vgt_dpcd_data *dpcd)
 +{
-+	int idx;
-+	uint8_t *data = dpcd->data;
-+
-+	for (idx = 0; idx < DPCD_SIZE; ++idx) {
-+		printk("0x%0x ", data[idx]);
-+		if (((idx + 1) & 0xf) == 0)
-+			printk("\n");
++	if (dpcd && dpcd->data_valid) {
++		_hex_dump(dpcd->data, DPCD_SIZE);
++	} else {
++		printk("DPCD is not available!\n");
 +	}
 +}
 diff --git a/drivers/xen/vgt/vgt.c b/drivers/xen/vgt/vgt.c
 new file mode 100644
-index 0000000..f1a96ea
+index 0000000..8cc4fc5
 --- /dev/null
 +++ b/drivers/xen/vgt/vgt.c
-@@ -0,0 +1,997 @@
+@@ -0,0 +1,1057 @@
 +/*
 + * vGT module interface
 + *
@@ -34943,8 +36167,8 @@ index 0000000..f1a96ea
 +bool vgt_delay_nest = true;
 +module_param_named(delay_nest, vgt_delay_nest, bool, 0600);
 +
-+bool vgt_debug = false;
-+module_param_named(debug, vgt_debug, bool, 0600);
++int vgt_debug = 0;
++module_param_named(debug, vgt_debug, int, 0600);
 +
 +bool vgt_enabled = true;
 +module_param_named(vgt, vgt_enabled, bool, 0400);
@@ -34963,6 +36187,11 @@ index 0000000..f1a96ea
 +bool render_engine_reset = true;
 +module_param_named(render_engine_reset, render_engine_reset, bool, 0600);
 +MODULE_PARM_DESC(render_engine_reset, "Reset rendering engines before loading another VM's context");
++
++bool propagate_monitor_to_guest = true;
++module_param_named(propagate_monitor_to_guest, propagate_monitor_to_guest, bool, 0600);
++MODULE_PARM_DESC(propagate_monitor_to_guest, "Propagate monitor information to guest by XenGT, other than dom0 services to do so");
++
 +/*
 + * FIXME: now video ring switch has weird issue. The cmd
 + * parser may enter endless loop even when head/tail is
@@ -35006,6 +36235,9 @@ index 0000000..f1a96ea
 +
 +bool enable_reset = true;
 +module_param_named(enable_reset, enable_reset, bool, 0600);
++
++bool vgt_lock_irq = true;
++module_param_named(vgt_lock_irq, vgt_lock_irq, bool, 0400);
 +
 +static vgt_ops_t vgt_xops = {
 +	.mem_read = vgt_emulate_read,
@@ -35195,7 +36427,7 @@ index 0000000..f1a96ea
 +	uint64_t	bar0, bar1;
 +	struct pci_dev *dev = pdev->pdev;
 +
-+	vgt_dbg("VGT: Initial_phys_states\n");
++	vgt_dbg(VGT_DBG_GENERIC, "VGT: Initial_phys_states\n");
 +
 +	pdev->gtt_size = vgt_get_gtt_size(pdev->pbus);
 +	gm_sz(pdev) = vgt_get_gtt_size(pdev->pbus) * 1024;
@@ -35209,9 +36441,9 @@ index 0000000..f1a96ea
 +
 +	for (i=0; i<VGT_CFG_SPACE_SZ; i+=4) {
 +		if (!(i % 16))
-+			vgt_dbg("\n[%2x]: ", i);
++			vgt_dbg(VGT_DBG_GENERIC, "\n[%2x]: ", i);
 +
-+		vgt_dbg("%02x %02x %02x %02x ",
++		vgt_dbg(VGT_DBG_GENERIC, "%02x %02x %02x %02x ",
 +			*((uint32_t *)&pdev->initial_cfg_space[i]) & 0xff,
 +			(*((uint32_t *)&pdev->initial_cfg_space[i]) & 0xff00) >> 8,
 +			(*((uint32_t *)&pdev->initial_cfg_space[i]) & 0xff0000) >> 16,
@@ -35360,8 +36592,14 @@ index 0000000..f1a96ea
 +	memset(pdev->detected_ports, 0, sizeof(pdev->detected_ports));
 +	bitmap_zero(pdev->dpy_emul_request, VGT_MAX_VMS);
 +
-+	/* initialize DPCD pointers of all DPs to NULL */
-+	memset(pdev->pdev_dpcds, 0, sizeof(struct vgt_dpcd_data *) * DPCD_MAX);
++	/* initialize ports */
++	memset(pdev->ports, 0, sizeof(struct gt_port) * VGT_PORT_MAX);
++	for (i = 0; i < I915_MAX_PORTS; i ++) {
++		pdev->ports[i].type = VGT_PORT_MAX;
++		pdev->ports[i].cache.type = VGT_PORT_MAX;
++		pdev->ports[i].port_override = i;
++		pdev->ports[i].physcal_port = i;
++	}
 +
 +	if (!initial_phys_states(pdev)) {
 +		printk("vGT: failed to initialize physical state\n");
@@ -35417,10 +36655,9 @@ index 0000000..f1a96ea
 +	if (vgt_cmd_parser_init(pdev) < 0)
 +		goto err;
 +
-+	vgt_probe_dpcd(pdev, -1);
-+
-+	vgt_probe_edid(pdev, -1);
-+
++	mutex_init(&pdev->hpd_work.hpd_mutex);
++	INIT_WORK(&pdev->hpd_work.work, vgt_hotplug_udev_notify_func);
++	
 +	/* create debugfs interface */
 +	if (!vgt_init_debugfs(pdev)) {
 +		printk("vGT:failed to create debugfs\n");
@@ -35440,7 +36677,7 @@ index 0000000..f1a96ea
 +		goto err;
 +
 +	pdev->owner[VGT_OT_DISPLAY] = vgt_dom0;
-+	vgt_dbg("create dom0 instance succeeds\n");
++	vgt_dbg(VGT_DBG_GENERIC, "create dom0 instance succeeds\n");
 +
 +	//show_mode_settings(pdev);
 +
@@ -35552,17 +36789,20 @@ index 0000000..f1a96ea
 +	vfree(pdev->reg_info);
 +	vfree(pdev->initial_mmio_state);
 +
-+	for (i = 0; i < VGT_PORT_MAX; ++ i) {
-+		if (pdev->pdev_edids[i]) {
-+			kfree(pdev->pdev_edids[i]);
-+			pdev->pdev_edids[i] = NULL;
++	for (i = 0; i < I915_MAX_PORTS; ++ i) {
++		if (pdev->ports[i].edid) {
++			kfree(pdev->ports[i].edid);
++			pdev->ports[i].edid = NULL;
 +		}
-+	}
 +
-+	for (i = 0; i < DPCD_MAX; ++ i) {
-+		if (pdev->pdev_dpcds[i]) {
-+			kfree(pdev->pdev_dpcds[i]);
-+			pdev->pdev_dpcds[i] = NULL;
++		if (pdev->ports[i].dpcd) {
++			kfree(pdev->ports[i].dpcd);
++			pdev->ports[i].dpcd = NULL;
++		}
++
++		if (pdev->ports[i].cache.edid) {
++			kfree(pdev->ports[i].cache.edid);
++			pdev->ports[i].cache.edid = NULL;
 +		}
 +	}
 +
@@ -35653,21 +36893,28 @@ index 0000000..f1a96ea
 +	state_sreg_init(vgt_dom0);
 +	state_vreg_init(vgt_dom0);
 +
-+
-+	vgt_probe_dpcd(pgt, -1);
-+
-+	vgt_probe_edid(pgt, -1);
-+
-+	/* initialize i2c states */
-+	vgt_init_i2c_bus(&vgt_dom0->vgt_i2c_bus);
-+	/* assign aux_ch vregs for aux_ch virtualization */
-+	vgt_init_aux_ch_vregs(&vgt_dom0->vgt_i2c_bus, vgt_dom0->state.vReg);
-+	vgt_propagate_edid(vgt_dom0, -1);
-+	vgt_propagate_dpcd(vgt_dom0, -1);
-+
-+	vgt_update_monitor_status(vgt_dom0);
-+
 +	/* TODO, GMBUS inuse bit? */
++
++	spin_lock(&pgt->lock);
++
++	recalculate_and_update_imr(pgt, _REG_DEIMR);
++	recalculate_and_update_imr(pgt, _REG_GTIMR);
++	recalculate_and_update_imr(pgt, _REG_PMIMR);
++	recalculate_and_update_imr(pgt, _REG_SDEIMR);
++
++	recalculate_and_update_imr(pgt, _REG_RCS_IMR);
++	recalculate_and_update_imr(pgt, _REG_BCS_IMR);
++	recalculate_and_update_imr(pgt, _REG_VCS_IMR);
++
++	if (IS_HSW(pgt))
++		recalculate_and_update_imr(pgt, _REG_VECS_IMR);
++
++	recalculate_and_update_ier(pgt, _REG_GTIER);
++	recalculate_and_update_ier(pgt, _REG_PMIER);
++	recalculate_and_update_ier(pgt, _REG_SDEIER);
++
++	spin_unlock(&pgt->lock);
++
 +	return 0;
 +}
 +EXPORT_SYMBOL(vgt_resume);
@@ -35725,6 +36972,36 @@ index 0000000..f1a96ea
 +	return;
 +}
 +
++int vgt_handle_dom0_device_reset(void)
++{
++	struct pgt_device *pdev = &default_device;
++	struct drm_device *drm_dev = pci_get_drvdata(pdev->pdev);
++
++	unsigned long flags;
++	int cpu;
++
++	int id;
++	bool rc;
++
++	ASSERT(drm_dev);
++
++	vgt_info("DOM0 hangcheck timer request reset device.\n");
++
++	vgt_lock_dev_flags(pdev, cpu, flags);
++	rc = idle_rendering_engines(pdev, &id);
++	vgt_unlock_dev_flags(pdev, cpu, flags);
++
++	if (!rc) {
++		vgt_info("Really hung, request to reset device.\n");
++		vgt_raise_request(pdev, VGT_REQUEST_DEVICE_RESET);
++	} else {
++		vgt_info("Not really hung, continue DOM0 reset sequence.\n");
++		i915_handle_error(drm_dev, true);
++	}
++
++	return 0;
++}
++
 +int vgt_reset_device(struct pgt_device *pdev)
 +{
 +	struct vgt_device *vgt;
@@ -35776,8 +37053,12 @@ index 0000000..f1a96ea
 +
 +	vgt_info("Disable master interrupt.\n");
 +
++	vgt_get_irq_lock(pdev, flags);
++
 +	VGT_MMIO_WRITE(pdev, _REG_DEIER,
 +			VGT_MMIO_READ(pdev, _REG_DEIER) & ~_REGBIT_MASTER_INTERRUPT);
++
++	vgt_put_irq_lock(pdev, flags);
 +
 +	do_device_reset(pdev);
 +
@@ -35788,13 +37069,16 @@ index 0000000..f1a96ea
 +	clear_bit(DEVICE_RESET_INPROGRESS, &pdev->device_reset_flags);
 +
 +	spin_lock_irqsave(&pdev->lock, flags);
++	vgt_get_irq_lock(pdev, flags);
 +
 +	ier = vgt_recalculate_ier(pdev, _REG_DEIER);
 +	VGT_MMIO_WRITE(pdev, _REG_DEIER, ier);
 +
-+	vgt_info("Enable master interrupt, DEIER: %lx\n", ier);
++	vgt_put_irq_lock(pdev, flags);
 +
 +	spin_unlock_irqrestore(&pdev->lock, flags);
++
++	vgt_info("Enable master interrupt, DEIER: %lx\n", ier);
 +
 +	return 0;
 +}
@@ -35871,10 +37155,10 @@ index 0000000..f1a96ea
 +module_exit(vgt_exit_module);
 diff --git a/drivers/xen/vgt/vgt.h b/drivers/xen/vgt/vgt.h
 new file mode 100644
-index 0000000..7647940
+index 0000000..8edfe31
 --- /dev/null
 +++ b/drivers/xen/vgt/vgt.h
-@@ -0,0 +1,2306 @@
+@@ -0,0 +1,2427 @@
 +/*
 + * vGT core headers
 + *
@@ -35944,7 +37228,7 @@ index 0000000..7647940
 +extern bool vgt_primary;
 +extern bool vgt_track_nest;
 +extern bool vgt_delay_nest;
-+extern bool vgt_debug;
++extern int   vgt_debug;
 +extern bool vgt_enabled;
 +extern bool fastpath_dpy_switch;
 +extern bool shadow_tail_based_qos;
@@ -35958,6 +37242,8 @@ index 0000000..7647940
 +extern bool render_engine_reset;
 +extern bool enable_panel_fitting;
 +extern bool enable_reset;
++extern bool vgt_lock_irq;
++extern bool propagate_monitor_to_guest;
 +
 +enum vgt_event_type {
 +	// GT
@@ -36081,8 +37367,16 @@ index 0000000..7647940
 +#define vgt_err(fmt, s...)	\
 +	do { printk(KERN_ERR "vGT error:(%s:%d) " fmt, __FUNCTION__, __LINE__, ##s); } while (0)
 +
-+#define vgt_dbg(fmt, s...)	\
-+	do { if (vgt_debug) printk(KERN_DEBUG "vGT debug:(%s:%d) " fmt, __FUNCTION__, __LINE__, ##s); } while (0)
++#define vgt_dbg(component, fmt, s...)	\
++	do { if (vgt_debug & component) printk(KERN_DEBUG "vGT debug:(%s:%d) " fmt, __FUNCTION__, __LINE__, ##s); } while (0)
++
++#define VGT_DBG_GENERIC   (1<<0)
++#define VGT_DBG_DPY   (1<<1)
++#define VGT_DBG_MEM   (1<<2)
++#define VGT_DBG_RENDER   (1<<3)
++#define VGT_DBG_CMD   (1<<4)
++#define VGT_DBG_IRQ   (1<<5)
++#define VGT_DBG_ALL     (0xffff)
 +
 +/*
 + * Define registers of a ring buffer per hardware register layout.
@@ -36285,6 +37579,7 @@ index 0000000..7647940
 +
 +struct pgt_device;
 +
++extern bool idle_rendering_engines(struct pgt_device *pdev, int *id);
 +extern bool idle_render_engine(struct pgt_device *pdev, int id);
 +extern bool vgt_do_render_context_switch(struct pgt_device *pdev);
 +extern void vgt_destroy(void);
@@ -36354,6 +37649,8 @@ index 0000000..7647940
 +	u64	ring_tail_mmio_wcycles;
 +	u64	vring_scan_cnt;
 +	u64	vring_scan_cycles;
++	u64	ppgtt_wp_cnt;
++	u64	ppgtt_wp_cycles;
 +};
 +
 +/* per-VM structure */
@@ -36408,6 +37705,9 @@ index 0000000..7647940
 +
 +/* DPCD addresses */
 +#define DPCD_REV			0x000
++#define DPCD_MAX_LINK_RATE			0x001
++#define DPCD_MAX_LANE_COUNT			0x002
++
 +#define DPCD_TRAINING_PATTERN_SET	0x102
 +#define	DPCD_SINK_COUNT			0x200
 +#define DPCD_LANE0_1_STATUS		0x202
@@ -36446,6 +37746,24 @@ index 0000000..7647940
 +	struct sbi_register registers[SBI_REG_MAX];
 +};
 +
++struct port_cache {
++	bool valid;
++	vgt_edid_data_t		*edid;	/* per display EDID information */
++	enum vgt_port		port_override;
++	enum vgt_port_type	type;
++};
++
++struct gt_port {
++	struct kobject  	kobj;
++
++	vgt_edid_data_t		*edid;	/* per display EDID information */
++	struct vgt_dpcd_data	*dpcd;	/* per display DPCD information */
++	enum vgt_port_type	type;
++	enum vgt_port		port_override;
++	struct port_cache	cache; /* the temporary updated information */
++	enum vgt_port physcal_port;
++};
++
 +struct vgt_device {
 +	enum vgt_pipe pipe_mapping[I915_MAX_PIPES];
 +	int vgt_id;		/* 0 is always for dom0 */
@@ -36455,10 +37773,8 @@ index 0000000..7647940
 +	vgt_state_t	state;		/* MMIO state except ring buffers */
 +	vgt_state_ring_t	rb[MAX_ENGINES];	/* ring buffer state */
 +
-+	struct vgt_port_struct *attached_port[I915_MAX_PIPES]; /* one port per PIPE */
++	struct gt_port		ports[I915_MAX_PORTS]; /* one port per PIPE */
 +	vgt_i2c_bus_t		vgt_i2c_bus;	/* i2c bus state emulaton for reading EDID */
-+	vgt_edid_data_t		*vgt_edids[VGT_PORT_MAX];	/* per display EDID information */
-+	struct vgt_dpcd_data		*vgt_dpcds[DPCD_MAX];	/* per display DPCD information */
 +
 +	DECLARE_BITMAP(presented_ports, VGT_PORT_MAX);
 +
@@ -36626,6 +37942,11 @@ index 0000000..7647940
 +	VGT_DISABLE_VGA,
 +	VGT_DISPLAY_READY,
 +	VGT_DISPLAY_UNREADY,
++	VGT_DETECT_PORT_A,
++	VGT_DETECT_PORT_B,
++	VGT_DETECT_PORT_C,
++	VGT_DETECT_PORT_D,
++	VGT_DETECT_PORT_E,
 +	UEVENT_MAX
 +};
 +
@@ -36637,7 +37958,9 @@ index 0000000..7647940
 +	int vm_id;
 +	enum kobject_action action;
 +	char *env_var_table[VGT_MAX_UEVENT_VARS];
-+	bool (*vgt_uevent_handler)(struct vgt_uevent_info *uevent_entry, struct pgt_device *dev);
++	bool (*vgt_uevent_handler)(enum vgt_uevent_type event,
++				struct vgt_uevent_info *uevent_entry,
++				struct pgt_device *dev);
 +};
 +
 +void vgt_set_uevent(struct vgt_device *vgt, enum vgt_uevent_type uevent);
@@ -36657,6 +37980,12 @@ index 0000000..7647940
 +		uint32_t rsvd_16_31 : 16;
 +	};
 +} vgt_hotplug_cmd_t;
++
++struct hotplug_work {
++	struct work_struct work;
++	DECLARE_BITMAP(hotplug_uevent, UEVENT_MAX);
++	struct mutex hpd_mutex;
++};
 +
 +enum vgt_output_type {
 +	VGT_OUTPUT_ANALOG = 0,
@@ -36733,8 +38062,8 @@ index 0000000..7647940
 +	u8 ring_xxx_bit[MAX_ENGINES];
 +	u8 ring_xxx_valid;
 +
-+	vgt_edid_data_t		*pdev_edids[VGT_PORT_MAX];	/* per display EDID information */
-+	struct vgt_dpcd_data	*pdev_dpcds[DPCD_MAX];	/* per display DPCD information */
++	struct gt_port ports[I915_MAX_PORTS];
++	DECLARE_BITMAP(detected_ports, VGT_PORT_MAX);
 +
 +	 /* 1 bit corresponds to 1MB in the GM space */
 +	DECLARE_BITMAP(gm_bitmap, VGT_GM_BITMAP_BITS);
@@ -36751,6 +38080,7 @@ index 0000000..7647940
 +
 +	struct page *dummy_page;
 +	struct page *(*rsvd_aperture_pages)[VGT_APERTURE_PAGES];
++	uint32_t dummy_pte;
 +
 +	uint64_t rsvd_aperture_sz;
 +	uint64_t rsvd_aperture_base;
@@ -36764,14 +38094,13 @@ index 0000000..7647940
 +	struct list_head rendering_runq_head; /* reuse this for context scheduler */
 +	struct list_head rendering_idleq_head; /* reuse this for context scheduler */
 +	spinlock_t lock;
++	spinlock_t irq_lock;
 +
 +	reg_info_t *reg_info;	/* virtualization policy for a given reg */
 +	struct vgt_irq_host_state *irq_hstate;
 +
 +	uint64_t vgtt_sz; /* in bytes */
 +	uint32_t *vgtt; /* virtual GTT table for guest to read*/
-+
-+	DECLARE_BITMAP(detected_ports, VGT_PORT_MAX);
 +
 +	DECLARE_BITMAP(dpy_emul_request, VGT_MAX_VMS);
 +
@@ -36795,6 +38124,8 @@ index 0000000..7647940
 +	bool dom0_irq_pending;
 +	unsigned long dom0_ipi_irq_injecting;
 +	int dom0_irq_cpu;
++
++	struct hotplug_work hpd_work;
 +};
 +
 +/*
@@ -37096,6 +38427,50 @@ index 0000000..7647940
 +static inline bool vgt_match_device_attr(struct pgt_device *pdev, reg_attr_t *attr)
 +{
 +	return attr->device & vgt_gen_dev_type(pdev);
++}
++
++static inline enum vgt_port vgt_get_port(struct vgt_device *vgt, struct gt_port *port_ptr)
++{
++	enum vgt_port port_type;
++
++	if (!vgt || !port_ptr)
++		return I915_MAX_PORTS;
++
++	for (port_type = PORT_A; port_type < I915_MAX_PORTS; ++ port_type)
++		if (port_ptr == &vgt->ports[port_type])
++			break;
++
++	return port_type;
++}
++
++static inline enum vgt_pipe vgt_get_pipe_from_port(struct vgt_device *vgt,
++						enum vgt_port port)
++{
++	enum vgt_pipe pipe;
++
++	if (port == I915_MAX_PORTS)
++		return I915_MAX_PIPES;
++
++	ASSERT (port != PORT_A);
++
++	for (pipe = PIPE_A; pipe < I915_MAX_PIPES; ++ pipe) {
++		vgt_reg_t ddi_func_ctl;
++		vgt_reg_t ddi_port_info;
++
++		ddi_func_ctl  = __vreg(vgt, _VGT_TRANS_DDI_FUNC_CTL(pipe));
++
++		if (!(ddi_func_ctl & _REGBIT_TRANS_DDI_FUNC_ENABLE))
++			continue;
++
++		ddi_port_info = (ddi_func_ctl & _REGBIT_TRANS_DDI_PORT_MASK) >>
++					_TRANS_DDI_PORT_SHIFT;
++		if (ddi_port_info == port) {
++			// pipe has the port setting same as input
++			break;
++		}
++	}
++
++	return pipe;
 +}
 +
 +/*
@@ -37876,11 +39251,17 @@ index 0000000..7647940
 +		cpu = vgt_enter();		\
 +	else					\
 +		cpu = 0;			\
-+	spin_lock_irq(&pdev->lock);		\
++	if (vgt_lock_irq)			\
++		spin_lock_irq(&pdev->lock);	\
++	else					\
++		spin_lock(&pdev->lock);		\
 +}
 +
 +#define vgt_unlock_dev(pdev, cpu) {		\
-+	spin_unlock_irq(&pdev->lock);		\
++	if (vgt_lock_irq)			\
++		spin_unlock_irq(&pdev->lock);	\
++	else					\
++		spin_unlock(&pdev->lock);	\
 +	if (likely(vgt_track_nest))		\
 +		vgt_exit(cpu);			\
 +	else					\
@@ -37888,19 +39269,34 @@ index 0000000..7647940
 +}
 +
 +#define vgt_lock_dev_flags(pdev, cpu, flags) {	\
++	flags = 0;				\
 +	if (likely(vgt_track_nest))		\
 +		cpu = vgt_enter();		\
 +	else					\
 +		cpu = 0;			\
-+	spin_lock_irqsave(&pdev->lock, flags);	\
++	if (vgt_lock_irq)			\
++		spin_lock_irqsave(&pdev->lock, flags);	\
++	else					\
++		spin_lock(&pdev->lock);		\
 +}
 +
 +#define vgt_unlock_dev_flags(pdev, cpu, flags) {	\
-+	spin_unlock_irqrestore(&pdev->lock, flags);	\
++	if (vgt_lock_irq)				\
++		spin_unlock_irqrestore(&pdev->lock, flags); \
++	else						\
++		spin_unlock(&pdev->lock);		\
 +	if (likely(vgt_track_nest))			\
 +		vgt_exit(cpu);				\
 +	else						\
 +		cpu = 0;				\
++}
++
++#define vgt_get_irq_lock(pdev, flags) {		\
++	spin_lock_irqsave(&pdev->irq_lock, flags);	\
++}
++
++#define vgt_put_irq_lock(pdev, flags) {		\
++	spin_unlock_irqrestore(&pdev->irq_lock, flags);	\
 +}
 +
 +void vgt_reset_virtual_states(struct vgt_device *vgt, unsigned long ring_bitmap);
@@ -37923,9 +39319,13 @@ index 0000000..7647940
 +void vgt_trigger_display_hot_plug(struct pgt_device *dev, vgt_hotplug_cmd_t hotplug_cmd);
 +
 +void vgt_signal_uevent(struct pgt_device *dev);
++void vgt_hotplug_udev_notify_func(struct work_struct *work);
 +
 +u32 vgt_recalculate_ier(struct pgt_device *pdev, unsigned int reg);
 +u32 vgt_recalculate_mask_bits(struct pgt_device *pdev, unsigned int reg);
++
++void recalculate_and_update_imr(struct pgt_device *pdev, vgt_reg_t reg);
++void recalculate_and_update_ier(struct pgt_device *pdev, vgt_reg_t reg);
 +
 +bool vgt_reg_imr_handler(struct vgt_device *vgt,
 +	unsigned int reg, void *p_data, unsigned int bytes);
@@ -37933,7 +39333,9 @@ index 0000000..7647940
 +	unsigned int reg, void *p_data, unsigned int bytes);
 +bool vgt_reg_iir_handler(struct vgt_device *vgt, unsigned int reg,
 +	void *p_data, unsigned int bytes);
-+bool vgt_reg_isr_handler(struct vgt_device *vgt, unsigned int reg,
++bool vgt_reg_isr_write(struct vgt_device *vgt, unsigned int reg,
++	void *p_data, unsigned int bytes);
++bool vgt_reg_isr_read(struct vgt_device *vgt, unsigned int reg,
 +	void *p_data, unsigned int bytes);
 +void vgt_reg_watchdog_handler(struct vgt_device *state,
 +	uint32_t reg, uint32_t val, bool write, ...);
@@ -37992,15 +39394,14 @@ index 0000000..7647940
 +void vgt_release_instance(struct vgt_device *vgt);
 +int vgt_init_sysfs(struct pgt_device *pdev);
 +void vgt_destroy_sysfs(void);
-+extern void vgt_set_display_pointer(int vm_id);
-+extern ssize_t vgt_get_display_pointer(char *buf);
-+extern void vgt_probe_edid(struct pgt_device *pdev, int index);
++extern void vgt_clear_port(struct vgt_device *vgt, int index);
++extern void vgt_probe_edid(struct pgt_device *pdev, int index, bool init);
 +extern void vgt_propagate_edid(struct vgt_device *vgt, int index);
-+extern void vgt_clear_edid(struct vgt_device *vgt, int index);
-+extern void vgt_probe_dpcd(struct pgt_device *pdev, int index);
++extern void vgt_probe_dpcd(struct pgt_device *pdev, int index, bool init);
 +extern void vgt_propagate_dpcd(struct vgt_device *vgt, int index);
-+extern void vgt_clear_dpcd(struct vgt_device *vgt, int index);
 +void vgt_update_monitor_status(struct vgt_device *vgt);
++void vgt_detect_display(struct vgt_device *vgt, int index);
++
 +
 +bool default_mmio_read(struct vgt_device *vgt, unsigned int offset,	void *p_data, unsigned int bytes);
 +bool default_mmio_write(struct vgt_device *vgt, unsigned int offset, void *p_data, unsigned int bytes);
@@ -38018,6 +39419,7 @@ index 0000000..7647940
 +
 +bool set_panel_fitting(struct vgt_device *vgt, enum vgt_pipe pipe);
 +void vgt_set_power_well(struct vgt_device *vgt, bool enable);
++void vgt_flush_port_info(struct vgt_device *vgt, struct gt_port *port);
 +
 +extern bool gtt_mmio_read(struct vgt_device *vgt, unsigned int off,
 +	void *p_data, unsigned int bytes);
@@ -38042,6 +39444,7 @@ index 0000000..7647940
 +
 +extern void vgt_add_wp_page_entry(struct vgt_device *vgt, struct vgt_wp_page_entry *e);
 +extern void vgt_del_wp_page_entry(struct vgt_device *vgt, unsigned int pfn);
++extern int vgt_unset_wp_pages(struct vgt_device *vgt, int nr, unsigned long *pages);
 +
 +extern bool vgt_init_shadow_ppgtt(struct vgt_device *vgt);
 +extern bool vgt_setup_ppgtt(struct vgt_device *vgt);
@@ -38144,6 +39547,7 @@ index 0000000..7647940
 +int setup_gtt(struct pgt_device *pdev);
 +void check_gtt(struct pgt_device *pdev);
 +void free_gtt(struct pgt_device *pdev);
++void vgt_clear_gtt(struct vgt_device *vgt);
 +void vgt_save_gtt_and_fence(struct pgt_device *pdev);
 +void vgt_restore_gtt_and_fence(struct pgt_device *pdev);
 +uint64_t vgt_get_gtt_size(struct pci_bus *bus);
@@ -38153,6 +39557,7 @@ index 0000000..7647940
 +void vgt_vmem_destroy(struct vgt_device *vgt);
 +void* vgt_vmem_gpa_2_va(struct vgt_device *vgt, unsigned long gpa);
 +struct vgt_device *vmid_2_vgt_device(int vmid);
++extern void vgt_print_edid(vgt_edid_data_t *edid);
 +extern void vgt_print_dpcd(struct vgt_dpcd_data *dpcd);
 +int vgt_fb_notifier_call_chain(unsigned long val, void *data);
 +void vgt_init_fb_notify(void);
@@ -38313,10 +39718,10 @@ index c9ea10e..0c0baaa 100644
  {
 diff --git a/include/xen/fb_decoder.h b/include/xen/fb_decoder.h
 new file mode 100644
-index 0000000..2e98b32
+index 0000000..468c83e
 --- /dev/null
 +++ b/include/xen/fb_decoder.h
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,139 @@
 +#ifndef __FB_DECODER_H__
 +#define __FB_DECODER_H__
 +/*
@@ -38390,17 +39795,27 @@ index 0000000..2e98b32
 +	u32	y_hot;		/* in pixels */
 +};
 +
-+#define INVALID_PIPE_ID	  -1
++/* The virtual DDI port type definition.
++ *
++ * DDI port A for eDP is not supported.
++ * DDI port E is for CRT.
++ * DDI_PORT_NONE means no valid port information available. When getting
++ * this return value from vgt_pipe_format, caller should stop using the
++ * virtual pipe and retry later.
++ */
++typedef enum {
++	DDI_PORT_NONE	= 0,
++	DDI_PORT_B	= 1,
++	DDI_PORT_C	= 2,
++	DDI_PORT_D	= 3,
++	DDI_PORT_E	= 4
++}ddi_port_t;
 +
-+/* when physical_pipe_id of struct vgt_pipe_format returns an
-+	* INVALID_PIPE_ID, it either means that this virtual pipe is not
-+	* enabled or the mapping is temporally unavailable.
-+	* the caller should stop using this virtual pipe and retry later. */
 +struct vgt_pipe_format{
 +	struct vgt_primary_plane_format	primary;
 +	struct vgt_sprite_plane_format	sprite;
 +	struct vgt_cursor_plane_format	cursor;
-+	int  physical_pipe_id;  /* the physical pipe id this pipe mapped to */
++	ddi_port_t ddi_port;  /* the DDI port that the pipe is connected to */
 +};
 +
 +#define MAX_INTEL_PIPES	3
@@ -39042,10 +40457,10 @@ index 0000000..72d238c
 +#endif /* _VGT_IF_H */
 diff --git a/include/xen/vgt.h b/include/xen/vgt.h
 new file mode 100644
-index 0000000..b1cce82
+index 0000000..7bea08b
 --- /dev/null
 +++ b/include/xen/vgt.h
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,144 @@
 +/*
 + * vgt.h: core header file for vGT driver
 + *
@@ -39186,6 +40601,7 @@ index 0000000..b1cce82
 +	put_cpu();
 +}
 +
++extern int vgt_handle_dom0_device_reset(void);
 +// MMIO definitions
 +
 +#endif	/* _VGT_H_ */
@@ -40647,12 +42063,21 @@ index 0000000..38e3ad5
 +	show_gpu_access()
 +else:
 +	show_reginfo()
+diff --git a/ubuntu/include/Kbuild b/ubuntu/include/Kbuild
+index 859e176..f3c61e0 100644
+--- a/ubuntu/include/Kbuild
++++ b/ubuntu/include/Kbuild
+@@ -1,2 +1,2 @@
+-header-y += linux/
+-header-y += uapi/
++#header-y += linux/
++#header-y += uapi/
 diff --git a/vgt.rules b/vgt.rules
 new file mode 100644
-index 0000000..16ccd14
+index 0000000..1fe4103
 --- /dev/null
 +++ b/vgt.rules
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,58 @@
 +# WARNING: for testing you should not try to use echo something to the screen. For the udev configure you may not even notice any output.
 +#		   So if you really want to verify if some uevents are received. You should not connt on any output message of your tested program.
 +#
@@ -40702,17 +42127,218 @@ index 0000000..16ccd14
 +#KERNEL=="control", RUN+="/bin/sh -c 'echo inserted >> /tmp/hotplug'"
 +#
 +#write 0x0f1(241) for plug in; 0x0f0(240) for pull out.
-+ACTION=="remove", KERNEL=="control", ENV{CRT_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff0 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{CRT_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff1 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_A_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff2 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_A_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff3 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_B_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff4 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_B_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff5 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_C_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff6 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_C_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff7 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="remove", KERNEL=="control", ENV{PORT_D_REMOVE}=="1", RUN+="/bin/sh -c 'echo 0xfff8 > /sys/kernel/vgt/control/virtual_event'"
-+ACTION=="add", KERNEL=="control", ENV{PORT_D_INSERT}=="1", RUN+="/bin/sh -c 'echo 0xfff9 > /sys/kernel/vgt/control/virtual_event'"
 +ACTION=="add", KERNEL=="control", ENV{VGT_ENABLE_VGA}=="1", RUN+="/bin/sh -c 'echo VM_$env{VMID}_enable_VGA_mode >> /tmp/vgt-log'"
 +ACTION=="add", KERNEL=="control", ENV{VGT_ENABLE_VGA}=="0", RUN+="/bin/sh -c 'echo VM_$env{VMID}_disable_VGA_mode >> /tmp/vgt-log'"
 +ACTION=="add", KERNEL=="control", ENV{VGT_DISPLAY_READY}=="1", RUN+="/bin/sh -c 'echo VM_$env{VMID}_display_ready >> /tmp/vgt-log'"
 +ACTION=="add", KERNEL=="control", ENV{VGT_DISPLAY_READY}=="0", RUN+="/bin/sh -c 'echo VM_$env{VMID}_display_unready >> /tmp/vgt-log'"
++ACTION=="add", KERNEL=="control", ENV{VGT_DETECT_PORT_A}=="1", RUN+="/bin/sh -c '/usr/bin/vgt_mgr --detect-display PORT_A'"
++ACTION=="add", KERNEL=="control", ENV{VGT_DETECT_PORT_B}=="1", RUN+="/bin/sh -c '/usr/bin/vgt_mgr --detect-display PORT_B'"
++ACTION=="add", KERNEL=="control", ENV{VGT_DETECT_PORT_C}=="1", RUN+="/bin/sh -c '/usr/bin/vgt_mgr --detect-display PORT_C'"
++ACTION=="add", KERNEL=="control", ENV{VGT_DETECT_PORT_D}=="1", RUN+="/bin/sh -c '/usr/bin/vgt_mgr --detect-display PORT_D'"
++ACTION=="add", KERNEL=="control", ENV{VGT_DETECT_PORT_E}=="1", RUN+="/bin/sh -c '/usr/bin/vgt_mgr --detect-display PORT_E'"
+diff --git a/vgt_mgr b/vgt_mgr
+new file mode 100755
+index 0000000..6f399b5
+--- /dev/null
++++ b/vgt_mgr
+@@ -0,0 +1,199 @@
++#!/bin/bash
++
++connector_lookup() {
++	lookup_return=unknown
++	if [ x"$1" == x"${connector_count[1]}" ]; then
++		lookup_return=PORT_B
++	elif [ x"$1" == x"${connector_count[2]}" ]; then
++		lookup_return=PORT_C
++	elif [ x"$1" == x"${connector_count[3]}" ]; then
++		lookup_return=PORT_D
++	fi
++}
++
++get_port_name() {
++	port_name=unknown
++	check_connector_table=0
++	if [ x"$1" == x"card0-eDP-1" ]; then
++		port_name=PORT_A
++	elif [ x"$1" == x"card0-VGA-1" ]; then
++		port_name=PORT_E
++	elif [ x"$1" == x"card0-DP-1" ]; then
++		check_connector_table=1
++	elif [ x"$1" == x"card0-DP-2" ]; then
++		check_connector_table=1
++	elif [ x"$1" == x"card0-DP-3" ]; then
++		check_connector_table=1
++	elif [ x"$1" == x"card0-HDMI-A-1" ]; then
++		check_connector_table=1
++	elif [ x"$1" == x"card0-HDMI-A-2" ]; then
++		check_connector_table=1
++	elif [ x"$1" == x"card0-HDMI-A-3" ]; then
++		check_connector_table=1
++	fi
++
++	if [ x"$check_connector_table" == x"1" ]; then
++		last_index=$((${#1}-1))
++		connector_lookup ${1:$last_index:1}
++		port_name=$lookup_return
++	fi
++}
++
++get_drm_name () {
++	drm_name=unknown
++	if [ x"$1" == x"PORT_A" ] && [ x"$2" == x"eDP" ] && [ x"${connector_count[0]}" != x"0" ]; then
++		drm_name=card0-eDP-1
++	elif [ x"$1" == x"PORT_B" ] && [ x"$2" == x"DP" ] && [ x"${connector_count[1]}" != x"0" ]; then
++		drm_name=card0-DP-${connector_count[1]}
++	elif [ x"$1" == x"PORT_B" ] && [ x"$2" == x"HDMI" ] && [ x"${connector_count[1]}" != x"0" ]; then
++		drm_name=card0-HDMI-A-${connector_count[1]}
++	elif [ x"$1" == x"PORT_C" ] && [ x"$2" == x"DP" ] && [ x"${connector_count[2]}" != x"0" ]; then
++		drm_name=card0-DP-${connector_count[2]}
++	elif [ x"$1" == x"PORT_C" ] && [ x"$2" == x"HDMI" ] && [ x"${connector_count[2]}" != x"0" ]; then
++		drm_name=card0-HDMI-A-${connector_count[2]}
++	elif [ x"$1" == x"PORT_D" ] && [ x"$2" == x"DP" ] && [ x"${connector_count[3]}" != x"0" ]; then
++		drm_name=card0-DP-${connector_count[3]}
++	elif [ x"$1" == x"PORT_D" ] && [ x"$2" == x"HDMI" ] && [ x"${connector_count[3]}" != x"0" ]; then
++		drm_name=card0-HDMI-A-${connector_count[3]}
++	elif [ x"$1" == x"PORT_E" ] && [ x"$2" == x"VGA" ] && [ x"${connector_count[4]}" != x"0" ]; then
++		drm_name=card0-VGA-1
++	fi
++}
++
++count=0
++
++connector_count[0]=1
++connector_count[1]=0
++connector_count[2]=0
++connector_count[3]=0
++connector_count[4]=1
++
++vgt_dir=/sys/kernel/vgt
++
++if [ x"`cat $vgt_dir/control/PORT_B/presence`" == x"present" ]; then
++	count=`expr $count + 1`
++	connector_count[1]=$count
++fi
++
++if [ x"`cat $vgt_dir/control/PORT_C/presence`" == x"present" ]; then
++	count=`expr $count + 1`
++	connector_count[2]=$count
++fi
++
++if [ x"`cat $vgt_dir/control/PORT_D/presence`" == x"present" ]; then
++	count=`expr $count + 1`
++	connector_count[3]=$count
++fi
++
++#######################################################################
++############################ --help ###################################
++#######################################################################
++if [ x"$1" == x"--help" ]; then
++	echo Usage: vgt_mgr --command param1 param2
++	exit 0
++fi
++
++
++#######################################################################
++############################ --version ################################
++#######################################################################
++if [ x"$1" == x"--version" ]; then
++	echo 1.0
++	exit 0
++fi
++
++
++#######################################################################
++############################ --get port name ##########################
++#######################################################################
++if [ x"$1" == x"--get-port-name" ]; then
++	get_port_name $2
++	echo $port_name
++	exit 0
++fi
++
++
++#######################################################################
++############################ --get drm name ###########################
++#######################################################################
++if [ x"$1" == x"--get-drm-name" ]; then
++	get_drm_name $2 $3
++	echo $drm_name
++	exit 0
++fi
++
++
++#######################################################################
++############################ --detect display #########################
++#######################################################################
++
++if [ x"$1" == x"--detect-display" ]; then
++	check_src2=0
++	type=0
++	connect=0
++	filelist=`ls $vgt_dir`
++	for guest in $filelist
++	do
++		if [ x"${guest:0:2}" != x"vm" ]; then
++			continue
++		fi
++
++		if [ x"$2" == x"PORT_A" ]; then
++			src1=/sys/class/drm/card0-eDP-1
++			target=$vgt_dir/$guest/PORT_A
++			type=1
++		elif [ x"$2" == x"PORT_B" ]; then
++			get_drm_name $2 DP
++			src1=/sys/class/drm/$drm_name
++			get_drm_name $2 HDMI
++			src2=/sys/class/drm/$drm_name
++			target=$vgt_dir/$guest/PORT_B
++			check_src2=1
++			type=2
++		elif [ x"$2" == x"PORT_C" ]; then
++			get_drm_name $2 DP
++			src1=/sys/class/drm/$drm_name
++			get_drm_name $2 HDMI
++			src2=/sys/class/drm/$drm_name
++			target=$vgt_dir/$guest/PORT_C
++			check_src2=1
++			type=3
++		elif [ x"$2" == x"PORT_D" ]; then
++			get_drm_name $2 DP
++			src1=/sys/class/drm/$drm_name
++			get_drm_name $2 HDMI
++			src2=/sys/class/drm/$drm_name
++			target=$vgt_dir/$guest/PORT_D
++			check_src2=1
++			type=4
++		elif [ x"$2" == x"PORT_E" ]; then
++			src1=/sys/class/drm/card0-VGA-1
++			target=$vgt_dir/$guest/PORT_E
++			type=0
++		fi
++
++		if [ ! -d $target ]; then
++			continue
++		fi
++
++		if [ -d $src1 ] && [ `cat $src1/status` == "connected" ]; then
++			dd if=$src1/edid of=$target/edid bs=128 count=1
++			echo $type > $target/type
++			connect=1
++		fi
++
++		if [ -d $src2 ] && [ $check_src2 -eq 1 ] && [ `cat $src2/status` == "connected" ]; then
++			dd if=$src2/edid of=$target/edid bs=128 count=1
++			type=`expr $type + 3`
++			echo $type > $target/type
++			connect=1
++		fi
++
++		if [ $connect -eq 1 ]; then
++			echo "connect" > $target/connection
++		else
++			echo "disconnect" > $target/connection
++		fi
++	done
++	exit 0
++fi
+\ No newline at end of file
