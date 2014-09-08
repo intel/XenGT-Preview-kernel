@@ -71,7 +71,7 @@ static long qxl_fence_wait(struct fence *fence, bool intr, signed long timeout)
 retry:
 	sc++;
 
-	if (fence_is_signaled_locked(fence))
+	if (fence_is_signaled(fence))
 		goto signaled;
 
 	qxl_io_notify_oom(qdev);
@@ -80,11 +80,11 @@ retry:
 		if (!qxl_queue_garbage_collect(qdev, true))
 			break;
 
-		if (fence_is_signaled_locked(fence))
+		if (fence_is_signaled(fence))
 			goto signaled;
 	}
 
-	if (fence_is_signaled_locked(fence))
+	if (fence_is_signaled(fence))
 		goto signaled;
 
 	if (have_drawable_releases || sc < 4) {
@@ -162,12 +162,14 @@ static void
 qxl_release_free_list(struct qxl_release *release)
 {
 	while (!list_empty(&release->bos)) {
-		struct ttm_validate_buffer *entry;
+		struct qxl_bo_list *entry;
+		struct qxl_bo *bo;
 
 		entry = container_of(release->bos.next,
-				     struct ttm_validate_buffer, head);
-
-		list_del(&entry->head);
+				     struct qxl_bo_list, tv.head);
+		bo = to_qxl_bo(entry->tv.bo);
+		qxl_bo_unref(&bo);
+		list_del(&entry->tv.head);
 		kfree(entry);
 	}
 }
@@ -438,7 +440,7 @@ void qxl_release_fence_buffer_objects(struct qxl_release *release)
 
 	/* if only one object on the release its the release itself
 	   since these objects are pinned no need to reserve */
-	if (list_is_singular(&release->bos))
+	if (list_is_singular(&release->bos) || list_empty(&release->bos))
 		return;
 
 	bo = list_first_entry(&release->bos, struct ttm_validate_buffer, head)->bo;
@@ -457,8 +459,6 @@ void qxl_release_fence_buffer_objects(struct qxl_release *release)
 	glob = bo->glob;
 
 	spin_lock(&glob->lru_lock);
-	/* acquire release_lock to protect bo->resv->fence and its contents */
-	spin_lock(&qdev->release_lock);
 
 	list_for_each_entry(entry, &release->bos, head) {
 		bo = entry->bo;
@@ -468,7 +468,6 @@ void qxl_release_fence_buffer_objects(struct qxl_release *release)
 		ttm_bo_add_to_lru(bo);
 		__ttm_bo_unreserve(bo);
 	}
-	spin_unlock(&qdev->release_lock);
 	spin_unlock(&glob->lru_lock);
 	ww_acquire_fini(&release->ticket);
 }
