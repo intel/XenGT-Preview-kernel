@@ -1,0 +1,14 @@
+origin/drm-intel-next-queued a2ca46441decdcdf4010f1db8a7041c8851327b3
+	drm/i915: split intel_primary_plane_setplane() into check() and commit()
+origin/drm-intel-fixes 7a98948f3b536ca9a077e84966ddc0e9f53726df
+	drm/i915: Wait for vblank before enabling the TV encoder
+drm-upstream/drm-next 58b21c22c66dd223d27405d54b47102a27bda0b7
+	drm/qxl: Fix crash in eviction from qxl_release_fence_buffer_objects
+drm-upstream/drm-fixes 68c78bd67bd6f868474ac75d98ea7d6ebf28d2e7
+	Merge branch 'linux-3.17' of git://anongit.freedesktop.org/git/nouveau/linux-2.6 into drm-fixes
+origin/topic/core-stuff 14d9424db0d851f5a52bc9c06b6d3b91dc6b2bc5
+	drm: Drop modeset locking from crtc init function
+origin/topic/vblank-rework 80b36f4386660ce59ee09e34f07c8a98857e2f38
+	arm: Use vblank_disable_and_save in drm_vblank_cleanup()
+sound-upstream/for-next 848f3a82df50fcc68a78c9d7d45e210b626b0283
+	ALSA: usb-audio: add native DSD support for XMOS based DACs
