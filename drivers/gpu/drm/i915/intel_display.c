@@ -8393,6 +8393,7 @@ static int intel_crtc_cursor_set_obj(struct drm_crtc *crtc,
 				     uint32_t width, uint32_t height)
 {
 	struct drm_device *dev = crtc->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
 	struct intel_crtc *intel_crtc = to_intel_crtc(crtc);
 	enum pipe pipe = intel_crtc->pipe;
 	unsigned old_width, stride;
