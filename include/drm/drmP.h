@@ -1079,6 +1079,16 @@ struct drm_device {
 	 */
 	bool vblank_disable_allowed;
 
+	/*
+	 * If true, vblank interrupt will be disabled immediately when the
+	 * refcount drops to zero, as opposed to via the vblank disable
+	 * timer.
+	 * This can be set to true it the hardware has a working vblank
+	 * counter and the driver uses drm_vblank_on() and drm_vblank_off()
+	 * appropriately.
+	 */
+	bool vblank_disable_immediate;
+
 	/* array of size num_crtcs */
 	struct drm_vblank_crtc *vblank;
 
@@ -1348,7 +1358,7 @@ extern void drm_put_dev(struct drm_device *dev);
 extern void drm_unplug_dev(struct drm_device *dev);
 extern unsigned int drm_debug;
 
-extern unsigned int drm_vblank_offdelay;
+extern int drm_vblank_offdelay;
 extern unsigned int drm_timestamp_precision;
 extern unsigned int drm_timestamp_monotonic;
 
