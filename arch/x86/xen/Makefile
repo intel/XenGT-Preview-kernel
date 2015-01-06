@@ -23,3 +23,7 @@ obj-$(CONFIG_XEN_DEBUG_FS)	+= debugfs.o
 obj-$(CONFIG_XEN_DOM0)		+= apic.o vga.o
 obj-$(CONFIG_SWIOTLB_XEN)	+= pci-swiotlb-xen.o
 obj-$(CONFIG_XEN_EFI)		+= efi.o
+obj-$(CONFIG_XEN_INST_DECODER)	+= x86_emulate.o
+obj-$(CONFIG_XEN_VGT_EMULATOR)	+= vgt_emulate.o
+CFLAGS_x86_emulate.o			+= -Wall -Werror
+CFLAGS_vgt_emulate.o			+= -Wall -Werror

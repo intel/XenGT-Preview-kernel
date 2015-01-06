@@ -2143,6 +2143,8 @@ void intel_flush_primary_plane(struct drm_i915_private *dev_priv,
 	struct drm_device *dev = dev_priv->dev;
 	u32 reg = INTEL_INFO(dev)->gen >= 4 ? DSPSURF(plane) : DSPADDR(plane);
 
+	printk("i915: intel_flush_display_plane\n");
+
 	I915_WRITE(reg, I915_READ(reg));
 	POSTING_READ(reg);
 }
@@ -3178,7 +3180,7 @@ static void gen6_fdi_link_train(struct drm_crtc *crtc)
 	if (i == 4)
 		DRM_ERROR("FDI train 2 fail!\n");
 
-	DRM_DEBUG_KMS("FDI train done.\n");
+	printk("FDI train done.\n");
 }
 
 /* Manual link training for Ivy Bridge A0 parts */
@@ -3219,6 +3221,9 @@ static void ivb_manual_fdi_link_train(struct drm_crtc *crtc)
 		temp &= ~FDI_LINK_TRAIN_PATTERN_MASK_CPT;
 		temp &= ~FDI_RX_ENABLE;
 		I915_WRITE(reg, temp);
+
+		POSTING_READ(reg);
+		udelay(150);
 
 		/* enable CPU FDI TX and PCH FDI RX */
 		reg = FDI_TX_CTL(pipe);
@@ -3261,6 +3266,9 @@ static void ivb_manual_fdi_link_train(struct drm_crtc *crtc)
 			DRM_DEBUG_KMS("FDI train 1 fail on vswing %d\n", j / 2);
 			continue;
 		}
+
+		POSTING_READ(reg);
+		udelay(150);
 
 		/* Train 2 */
 		reg = FDI_TX_CTL(pipe);
@@ -11553,6 +11561,8 @@ static int intel_crtc_set_config(struct drm_mode_set *set)
 	struct drm_mode_set save_set;
 	struct intel_set_config *config;
 	int ret;
+	
+	struct drm_i915_private *dev_priv;
 
 	BUG_ON(!set);
 	BUG_ON(!set->crtc);
@@ -11571,6 +11581,7 @@ static int intel_crtc_set_config(struct drm_mode_set *set)
 	}
 
 	dev = set->crtc->dev;
+	dev_priv = dev->dev_private;
 
 	ret = -ENOMEM;
 	config = kzalloc(sizeof(*config), GFP_KERNEL);

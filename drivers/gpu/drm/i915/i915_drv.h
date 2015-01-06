@@ -48,6 +48,16 @@
 #include <linux/kref.h>
 #include <linux/pm_qos.h>
 
+#if defined(CONFIG_XEN_VGT_I915) || defined(CONFIG_XEN_VGT_I915_MODULE)
+#define DRM_I915_VGT_SUPPORT	1
+#endif
+
+#ifdef DRM_I915_VGT_SUPPORT
+#include <xen/vgt.h>
+#include <xen/vgt-if.h>
+#include <xen/fb_decoder.h>
+#endif
+
 /* General customization:
  */
 
@@ -1137,6 +1147,12 @@ struct i915_gem_mm {
 
 	/** PPGTT used for aliasing the PPGTT with the GTT */
 	struct i915_hw_ppgtt *aliasing_ppgtt;
+	/*
+	 * VGT:
+	 * Original i915 driver in 3.11.6 remove this entry,
+	 * whatever we need this for PPGTT ballooning.
+	 */
+	unsigned int first_ppgtt_pde_in_gtt;
 
 	struct notifier_block oom_notifier;
 	struct shrinker shrinker;
@@ -1189,6 +1205,14 @@ struct i915_gem_mm {
 	spinlock_t object_stat_lock;
 	size_t object_memory;
 	u32 object_count;
+
+#ifdef DRM_I915_VGT_SUPPORT
+	/* VGT balloon info */
+	unsigned long vgt_low_gm_base;
+	unsigned long vgt_low_gm_size;
+	unsigned long vgt_high_gm_base;
+	unsigned long vgt_high_gm_size;
+#endif
 };
 
 struct drm_i915_error_state_buf {
@@ -1686,6 +1710,7 @@ struct drm_i915_private {
 	/* Old dri1 support infrastructure, beware the dragons ya fools entering
 	 * here! */
 	struct i915_dri1_state dri1;
+
 	/* Old ums support infrastructure, same warning applies. */
 	struct i915_ums_state ums;
 
@@ -1746,6 +1771,8 @@ struct drm_i915_gem_object_ops {
 	void (*put_pages)(struct drm_i915_gem_object *);
 	int (*dmabuf_export)(struct drm_i915_gem_object *);
 	void (*release)(struct drm_i915_gem_object *);
+	int (*pin)(struct drm_i915_gem_object *, uint32_t, bool, bool);
+	void (*unpin)(struct drm_i915_gem_object *);
 };
 
 /*
@@ -1850,6 +1877,8 @@ struct drm_i915_gem_object {
 	unsigned int has_global_gtt_mapping:1;
 	unsigned int has_dma_mapping:1;
 
+	unsigned int has_vmfb_mapping:1;
+
 	unsigned int frontbuffer_bits:INTEL_FRONTBUFFER_BITS;
 
 	struct sg_table *pages;
@@ -1896,6 +1925,7 @@ struct drm_i915_gem_object {
 		} userptr;
 	};
 };
+
 #define to_intel_bo(x) container_of(x, struct drm_i915_gem_object, base)
 
 void i915_gem_track_fb(struct drm_i915_gem_object *old,
@@ -2134,10 +2164,11 @@ struct drm_i915_cmd_table {
 				 to_i915(dev)->ellc_size)
 #define I915_NEED_GFX_HWS(dev)	(INTEL_INFO(dev)->need_gfx_hws)
 
+#define USES_VGT(dev)		(i915.enable_vgt)
 #define HAS_HW_CONTEXTS(dev)	(INTEL_INFO(dev)->gen >= 6)
 #define HAS_LOGICAL_RING_CONTEXTS(dev)	(INTEL_INFO(dev)->gen >= 8)
 #define HAS_ALIASING_PPGTT(dev)	(INTEL_INFO(dev)->gen >= 6)
-#define HAS_PPGTT(dev)		(INTEL_INFO(dev)->gen >= 7 && !IS_GEN8(dev))
+#define HAS_PPGTT(dev)		(INTEL_INFO(dev)->gen >= 7 && !IS_GEN8(dev) && !USES_VGT(dev))
 #define USES_PPGTT(dev)		(i915.enable_ppgtt)
 #define USES_FULL_PPGTT(dev)	(i915.enable_ppgtt == 2)
 
@@ -2175,8 +2206,8 @@ struct drm_i915_cmd_table {
 #define HAS_DDI(dev)		(INTEL_INFO(dev)->has_ddi)
 #define HAS_FPGA_DBG_UNCLAIMED(dev)	(INTEL_INFO(dev)->has_fpga_dbg)
 #define HAS_PSR(dev)		(IS_HASWELL(dev) || IS_BROADWELL(dev))
-#define HAS_RUNTIME_PM(dev)	(IS_GEN6(dev) || IS_HASWELL(dev) || \
-				 IS_BROADWELL(dev) || IS_VALLEYVIEW(dev))
+#define HAS_RUNTIME_PM(dev)	(!USES_VGT(dev) && (IS_GEN6(dev) || IS_HASWELL(dev) || \
+				 IS_BROADWELL(dev) || IS_VALLEYVIEW(dev)))
 
 #define INTEL_PCH_DEVICE_ID_MASK		0xff00
 #define INTEL_PCH_IBX_DEVICE_ID_TYPE		0x3b00
@@ -2223,6 +2254,7 @@ struct i915_params {
 	int enable_rc6;
 	int enable_fbc;
 	int enable_ppgtt;
+	bool ctx_switch;
 	int enable_execlists;
 	int enable_psr;
 	unsigned int preliminary_hw_support;
@@ -2239,6 +2271,7 @@ struct i915_params {
 	bool disable_vtd_wa;
 	int use_mmio_flip;
 	bool mmio_debug;
+	int enable_vgt;
 };
 extern struct i915_params i915 __read_mostly;
 
@@ -2353,6 +2386,8 @@ int i915_gem_entervt_ioctl(struct drm_device *dev, void *data,
 			   struct drm_file *file_priv);
 int i915_gem_leavevt_ioctl(struct drm_device *dev, void *data,
 			   struct drm_file *file_priv);
+int i915_gem_vgtbuffer_ioctl(struct drm_device *dev, void *data,
+			     struct drm_file *file);
 int i915_gem_set_tiling(struct drm_device *dev, void *data,
 			struct drm_file *file_priv);
 int i915_gem_get_tiling(struct drm_device *dev, void *data,
@@ -2406,11 +2441,15 @@ static inline struct page *i915_gem_object_get_page(struct drm_i915_gem_object *
 }
 static inline void i915_gem_object_pin_pages(struct drm_i915_gem_object *obj)
 {
+	if (obj->has_vmfb_mapping)
+		return;
 	BUG_ON(obj->pages == NULL);
 	obj->pages_pin_count++;
 }
 static inline void i915_gem_object_unpin_pages(struct drm_i915_gem_object *obj)
 {
+	if (obj->has_vmfb_mapping)
+		return;
 	BUG_ON(obj->pages_pin_count == 0);
 	obj->pages_pin_count--;
 }
@@ -2487,6 +2526,7 @@ int i915_gem_init_rings(struct drm_device *dev);
 int __must_check i915_gem_init_hw(struct drm_device *dev);
 int i915_gem_l3_remap(struct intel_engine_cs *ring, int slice);
 void i915_gem_init_swizzling(struct drm_device *dev);
+bool intel_enable_ppgtt(struct drm_device *dev);
 void i915_gem_cleanup_ringbuffer(struct drm_device *dev);
 int __must_check i915_gpu_idle(struct drm_device *dev);
 int __must_check i915_gem_suspend(struct drm_device *dev);
@@ -2853,6 +2893,12 @@ extern void intel_display_print_error_state(struct drm_i915_error_state_buf *e,
 void gen6_gt_force_wake_get(struct drm_i915_private *dev_priv, int fw_engine);
 void gen6_gt_force_wake_put(struct drm_i915_private *dev_priv, int fw_engine);
 void assert_force_wake_inactive(struct drm_i915_private *dev_priv);
+
+#ifdef DRM_I915_VGT_SUPPORT
+#define VGT_IF_VERSION	0x10000		/* 1.0 */
+extern void vgt_install_irq(struct pci_dev *pdev);
+extern void i915_check_vgt(struct drm_i915_private *dev_priv);
+#endif
 
 int sandybridge_pcode_read(struct drm_i915_private *dev_priv, u8 mbox, u32 *val);
 int sandybridge_pcode_write(struct drm_i915_private *dev_priv, u8 mbox, u32 val);

@@ -2478,6 +2478,11 @@ static irqreturn_t ironlake_irq_handler(int irq, void *arg)
 	u32 de_iir, gt_iir, de_ier, sde_ier = 0;
 	irqreturn_t ret = IRQ_NONE;
 
+#ifdef DRM_I915_VGT_SUPPORT
+	if (USES_VGT(dev) && !vgt_can_process_irq())
+		return IRQ_HANDLED;
+#endif
+
 	/* We get interrupts on unclaimed registers, so check for this before we
 	 * do any I915_{READ,WRITE}. */
 	intel_uncore_check_errors(dev);
@@ -3250,6 +3255,12 @@ static void i915_hangcheck_elapsed(unsigned long data)
 	if (!i915.enable_hangcheck)
 		return;
 
+#ifdef DRM_I915_VGT_SUPPORT
+	if (USES_VGT(dev)
+		&& !vgt_can_process_timer(&dev_priv->gpu_error.hangcheck_timer))
+		return;
+#endif
+
 	for_each_ring(ring, dev_priv, i) {
 		u64 acthd;
 		u32 seqno;
@@ -3341,8 +3352,14 @@ static void i915_hangcheck_elapsed(unsigned long data)
 		}
 	}
 
-	if (rings_hung)
-		return i915_handle_error(dev, true, "Ring hung");
+	if (rings_hung) {
+#ifdef DRM_I915_VGT_SUPPORT
+		if (USES_VGT(dev) && vgt_handle_dom0_device_reset())
+			return;
+#endif
+		i915_handle_error(dev, true, "Ring hung");
+		return;
+	}
 
 	if (busy_count)
 		/* Reset timer case chip hangs without another request
@@ -3402,6 +3419,8 @@ static void gen5_gt_irq_reset(struct drm_device *dev)
 		GEN5_IRQ_RESET(GEN6_PM);
 }
 
+extern void vgt_install_irq(struct pci_dev *pdev);
+
 /* drm_dma.h hooks
 */
 static void ironlake_irq_reset(struct drm_device *dev)
@@ -3417,6 +3436,13 @@ static void ironlake_irq_reset(struct drm_device *dev)
 	gen5_gt_irq_reset(dev);
 
 	ibx_irq_reset(dev);
+
+#ifdef DRM_I915_VGT_SUPPORT
+	/* a hacky hook to vGT driver */
+	printk("vGT: setup vGT irq hook in %s\n", __FUNCTION__);
+	if (USES_VGT(dev))
+		vgt_install_irq(dev->pdev);
+#endif
 }
 
 static void valleyview_irq_preinstall(struct drm_device *dev)
@@ -3476,6 +3502,13 @@ static void gen8_irq_reset(struct drm_device *dev)
 	GEN5_IRQ_RESET(GEN8_PCU_);
 
 	ibx_irq_reset(dev);
+
+#ifdef DRM_I915_VGT_SUPPORT
+	/* a hacky hook to vGT driver */
+	printk("vGT: setup vGT irq hook in %s\n", __FUNCTION__);
+	if (USES_VGT(dev))
+		vgt_install_irq(dev->pdev);
+#endif
 }
 
 void gen8_irq_power_well_post_enable(struct drm_i915_private *dev_priv)
@@ -3617,6 +3650,15 @@ static int ironlake_irq_postinstall(struct drm_device *dev)
 				DE_PLANEA_FLIP_DONE_IVB | DE_AUX_CHANNEL_A_IVB);
 		extra_mask = (DE_PIPEC_VBLANK_IVB | DE_PIPEB_VBLANK_IVB |
 			      DE_PIPEA_VBLANK_IVB | DE_ERR_INT_IVB);
+
+		I915_WRITE(GEN7_ERR_INT, I915_READ(GEN7_ERR_INT));
+
+		/*
+		 * Do not enable ERR_INT for VGT temporarily,
+		 * as VGT doesn't handle this.
+		 */
+		if (USES_VGT(dev))
+			extra_mask &= ~DE_ERR_INT_IVB;
 	} else {
 		display_mask = (DE_MASTER_IRQ_CONTROL | DE_GSE | DE_PCH_EVENT |
 				DE_PLANEA_FLIP_DONE | DE_PLANEB_FLIP_DONE |
@@ -4667,6 +4709,11 @@ void intel_irq_init(struct drm_device *dev)
 	setup_timer(&dev_priv->gpu_error.hangcheck_timer,
 		    i915_hangcheck_elapsed,
 		    (unsigned long) dev);
+
+#ifdef DRM_I915_VGT_SUPPORT
+	vgt_new_delay_event_timer(&dev_priv->gpu_error.hangcheck_timer);
+#endif
+
 	INIT_DELAYED_WORK(&dev_priv->hotplug_reenable_work,
 			  intel_hpd_irq_reenable);
 

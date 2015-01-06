@@ -42,7 +42,36 @@ struct xen_hvm_pagetable_dying {
 };
 typedef struct xen_hvm_pagetable_dying xen_hvm_pagetable_dying_t;
 DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_pagetable_dying_t);
- 
+
+/* MSI injection for emulated devices */
+#define HVMOP_inject_msi         16
+struct xen_hvm_inject_msi {
+    /* Domain to be injected */
+    domid_t   domid;
+    /* Data -- lower 32 bits */
+    uint32_t  data;
+    /* Address (0xfeexxxxx) */
+    uint64_t  addr;
+};
+typedef struct xen_hvm_inject_msi xen_hvm_inject_msi_t;
+DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_inject_msi_t);
+
+#define HVMOP_vgt_map_mmio           18
+struct xen_hvm_vgt_map_mmio {
+	uint16_t  domid;
+    uint16_t  map;		/* 1: Map, 0: Unmap */
+    uint32_t  nr_mfns;
+    uint64_t  first_gfn;
+    uint64_t  first_mfn;
+};
+typedef struct xen_hvm_vgt_map_mmio xen_hvm_vgt_map_mmio_t;
+
+#define HVMOP_vgt_enable           19
+struct xen_hvm_vgt_enable {
+	uint16_t  domid;
+};
+typedef struct xen_hvm_vgt_enable xen_hvm_vgt_enable_t;
+
 enum hvmmem_type_t {
     HVMMEM_ram_rw,             /* Normal read/write guest RAM */
     HVMMEM_ram_ro,             /* Read-only; writes are discarded */
@@ -62,4 +91,13 @@ struct xen_hvm_get_mem_type {
 };
 DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_get_mem_type);
 
+#define HVMOP_vgt_wp_pages         20  /* writeprotection to guest pages */
+#define MAX_WP_BATCH_PAGES         128
+struct xen_hvm_vgt_wp_pages {
+	uint16_t domid;
+	uint16_t set;            /* 1: set WP, 0: remove WP */
+	uint16_t nr_pages;
+	unsigned long  wp_pages[MAX_WP_BATCH_PAGES];
+};
+typedef struct xen_hvm_vgt_wp_pages xen_hvm_vgt_wp_pages_t;
 #endif /* __XEN_PUBLIC_HVM_HVM_OP_H__ */

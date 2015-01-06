@@ -29,6 +29,7 @@
 
 #include <linux/device.h>
 #include <linux/acpi.h>
+#include <xen/vgt.h>
 #include <drm/drmP.h>
 #include <drm/i915_drm.h>
 #include "i915_drv.h"
@@ -408,6 +409,8 @@ void intel_detect_pch(struct drm_device *dev)
 	struct drm_i915_private *dev_priv = dev->dev_private;
 	struct pci_dev *pch = NULL;
 
+	printk("i915: intel_detect_pch\n");
+
 	/* In all current cases, num_pipes is equivalent to the PCH_NOP setting
 	 * (which really amounts to a PCH but no South Display).
 	 */
@@ -751,10 +754,39 @@ static int i915_resume_early(struct drm_device *dev)
 	return i915_drm_thaw_early(dev);
 }
 
+/* vGT: for debug only. need cleanup. */
+static uint32_t gen_dev_pci_cfg_space[256/4];
+
 int i915_resume(struct drm_device *dev)
 {
 	struct drm_i915_private *dev_priv = dev->dev_private;
 	int ret;
+#ifdef DRM_I915_VGT_SUPPORT
+        /* XXX: need cleanup the code and make it work for native case!
+         * i.e., use the dev_priv->in_xen_vgt...
+         */
+	{
+		int error;
+		uint32_t tmp;
+		int i;
+		for (i = 0; i < ARRAY_SIZE(gen_dev_pci_cfg_space); i++) {
+			pci_read_config_dword(dev->pdev, i*4, &tmp);
+
+			if (tmp == gen_dev_pci_cfg_space[i])
+				continue;
+
+			printk("vGT: i915: cfg_space[0x%02x]: old = 0x%08x, "
+					"new =0x%08x: changed across S3!\n",
+					i*4, gen_dev_pci_cfg_space[i], tmp);
+		}
+
+		error = vgt_resume(dev->pdev);
+		if (error)
+			return error;
+
+		set_gen_pci_cfg_space_pt(0);
+	}
+#endif
 
 	/*
 	 * Platforms with opregion should have sane BIOS, older ones (gen3 and
@@ -901,6 +933,12 @@ static int i915_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	driver.driver_features &= ~(DRIVER_USE_AGP);
 
+#ifdef DRM_I915_VGT_SUPPORT
+	/* enforce dependancy and initialize the vGT driver */
+	xen_start_vgt(pdev);
+	printk("i915: xen_start_vgt done\n");
+#endif
+
 	return drm_get_pci_dev(pdev, ent, &driver);
 }
 
@@ -916,6 +954,7 @@ static int i915_pm_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct drm_device *drm_dev = pci_get_drvdata(pdev);
+	int error;
 
 	if (!drm_dev || !drm_dev->dev_private) {
 		dev_err(dev, "DRM not initialized, aborting suspend.\n");
@@ -925,7 +964,29 @@ static int i915_pm_suspend(struct device *dev)
 	if (drm_dev->switch_power_state == DRM_SWITCH_POWER_OFF)
 		return 0;
 
-	return i915_drm_freeze(drm_dev);
+#ifdef DRM_I915_VGT_SUPPORT
+	{
+		int i;
+
+		/* need cleanup for the native case */
+		set_gen_pci_cfg_space_pt(1);
+
+		for (i = 0; i < ARRAY_SIZE(gen_dev_pci_cfg_space); i++)
+			pci_read_config_dword(pdev, i*4,
+					&gen_dev_pci_cfg_space[i]);
+	}
+#endif
+
+	error = i915_drm_freeze(drm_dev);
+	if (error)
+		return error;
+
+#ifdef DRM_I915_VGT_SUPPORT
+	error = vgt_suspend(pdev);
+	if (error)
+		return error;
+#endif
+	return 0;
 }
 
 static int i915_pm_suspend_late(struct device *dev)

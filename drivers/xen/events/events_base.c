@@ -303,6 +303,11 @@ unsigned cpu_from_irq(unsigned irq)
 	return info_for_irq(irq)->cpu;
 }
 
+int xen_get_cpu_from_irq(unsigned int irq)
+{
+       return cpu_from_irq(irq);
+}
+
 unsigned int cpu_from_evtchn(unsigned int evtchn)
 {
 	int irq = get_evtchn_to_irq(evtchn);
@@ -1691,3 +1696,22 @@ void __init xen_init_IRQ(void)
 	}
 #endif
 }
+
+int resend_irq_on_evtchn(unsigned int irq)
+{
+	unsigned int evtchn = evtchn_from_irq(irq);
+	int masked;
+
+	if (!VALID_EVTCHN(evtchn))
+		return 0;
+
+	masked = test_and_set_mask(evtchn);
+	set_evtchn(evtchn);
+	if (!masked)
+		unmask_evtchn(evtchn);
+
+	return 1;
+}
+
+EXPORT_SYMBOL(resend_irq_on_evtchn);
+EXPORT_SYMBOL(bind_virq_to_irq);

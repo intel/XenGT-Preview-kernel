@@ -41,6 +41,11 @@
 #include <linux/vgaarb.h>
 #include <linux/export.h>
 
+#if defined(CONFIG_XEN_VGT_I915) || defined(CONFIG_XEN_VGT_I915_MODULE)
+#include <xen/vgt.h>
+#define DRM_VGT_SUPPORT 1
+#endif
+
 /* Access macro for slots in vblank timestamp ringbuffer. */
 #define vblanktimestamp(dev, crtc, count) \
 	((dev)->vblank[crtc].time[(count) % DRM_VBLANKTIME_RBSIZE])
@@ -222,6 +227,11 @@ static void vblank_disable_fn(unsigned long arg)
 	if (!dev->vblank_disable_allowed)
 		return;
 
+#ifdef DRM_VGT_I915_SUPPORT
+	if (!vgt_can_process_timer(&vblank->disable_timer))
+		return;
+#endif
+
 	spin_lock_irqsave(&dev->vbl_lock, irqflags);
 	if (atomic_read(&vblank->refcount) == 0 && vblank->enabled) {
 		DRM_DEBUG("disabling vblank on crtc %d\n", crtc);
@@ -292,6 +302,9 @@ int drm_vblank_init(struct drm_device *dev, int num_crtcs)
 		init_waitqueue_head(&vblank->queue);
 		setup_timer(&vblank->disable_timer, vblank_disable_fn,
 			    (unsigned long)vblank);
+#ifdef DRM_VGT_SUPPORT
+		vgt_new_delay_event_timer(&vblank->disable_timer);
+#endif
 	}
 
 	DRM_INFO("Supports vblank timestamp caching Rev 2 (21.10.2013).\n");
@@ -360,7 +373,7 @@ int drm_irq_install(struct drm_device *dev, int irq)
 	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
 		return -EINVAL;
 
-	if (irq == 0)
+	if (!irq && !dev->pdev)
 		return -EINVAL;
 
 	/* Driver must have been initialized */
@@ -380,6 +393,9 @@ int drm_irq_install(struct drm_device *dev, int irq)
 	/* Install handler */
 	if (drm_core_check_feature(dev, DRIVER_IRQ_SHARED))
 		sh_flags = IRQF_SHARED;
+
+	if (irq == 0 && dev->pdev)
+		irq = dev->pdev->irq;
 
 	ret = request_irq(irq, dev->driver->irq_handler,
 			  sh_flags, dev->driver->name, dev);
@@ -430,6 +446,7 @@ int drm_irq_uninstall(struct drm_device *dev)
 	unsigned long irqflags;
 	bool irq_enabled;
 	int i;
+	void vgt_uninstall_irq(struct pci_dev *pdev);
 
 	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
 		return -EINVAL;
@@ -465,6 +482,9 @@ int drm_irq_uninstall(struct drm_device *dev)
 		dev->driver->irq_uninstall(dev);
 
 	free_irq(dev->irq, dev);
+
+	/* TODO: add a dev->driver->post_irq_uninstall? */
+	vgt_uninstall_irq(dev->pdev);
 
 	return 0;
 }

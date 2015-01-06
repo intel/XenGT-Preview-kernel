@@ -31,6 +31,9 @@
 static const struct intel_renderstate_rodata *
 render_state_get_rodata(struct drm_device *dev, const int gen)
 {
+	if (USES_VGT(dev))
+		return NULL;
+
 	switch (gen) {
 	case 6:
 		return &gen6_null_state;
