@@ -224,7 +224,7 @@ int intel_sanitize_enable_execlists(struct drm_device *dev, int enable_execlists
 	if (INTEL_INFO(dev)->gen >= 9)
 		return 1;
 
-	if (enable_execlists == 0)
+	if (enable_execlists == 0 && !USES_VGT(dev))
 		return 0;
 
 	if (HAS_LOGICAL_RING_CONTEXTS(dev) && USES_PPGTT(dev) &&
@@ -1624,6 +1624,21 @@ out:
 	return ret;
 }
 
+static void intel_lr_context_notify_vgt(struct drm_i915_gem_object *ctx_obj,
+					struct drm_device *dev, int msg)
+{
+	struct drm_i915_private *dev_priv = dev->dev_private;
+
+	u64 tmp = execlists_ctx_descriptor(ctx_obj);
+
+	I915_WRITE(vgt_info_off(execlist_context_descriptor_lo),
+			tmp & 0xffffffff);
+	I915_WRITE(vgt_info_off(execlist_context_descriptor_hi),
+			tmp >> 32);
+
+	I915_WRITE(vgt_info_off(g2v_notify), msg);
+}
+
 static int
 populate_lr_context(struct intel_context *ctx, struct drm_i915_gem_object *ctx_obj,
 		    struct intel_engine_cs *ring, struct intel_ringbuffer *ringbuf)
@@ -1730,6 +1745,19 @@ populate_lr_context(struct intel_context *ctx, struct drm_i915_gem_object *ctx_o
 		reg_state[CTX_R_PWR_CLK_STATE+1] = 0;
 	}
 
+	if (USES_VGT(ring->dev)) {
+		/* Allocate VMA instantly. */
+		ret = i915_gem_obj_ggtt_pin(ctx_obj,
+				GEN8_LR_CONTEXT_ALIGN, 0);
+		if (ret) {
+			DRM_DEBUG_DRIVER("Pin LRC backing obj failed: %d\n",
+					ret);
+			return ret;
+		}
+		intel_lr_context_notify_vgt(ctx_obj, ring->dev,
+				VGT_G2V_EXECLIST_CONTEXT_ELEMENT_CREATE);
+	}
+
 	kunmap_atomic(reg_state);
 
 	ctx_obj->dirty = 1;
@@ -1758,6 +1786,12 @@ void intel_lr_context_free(struct intel_context *ctx)
 			struct intel_ringbuffer *ringbuf =
 					ctx->engine[i].ringbuf;
 			struct intel_engine_cs *ring = ringbuf->ring;
+
+			if (USES_VGT(ringbuf->ring->dev)) {
+				intel_lr_context_notify_vgt(ctx_obj, ringbuf->ring->dev,
+						VGT_G2V_EXECLIST_CONTEXT_ELEMENT_DESTROY);
+				i915_gem_object_ggtt_unpin(ctx_obj);
+			}
 
 			if (ctx == ring->default_context) {
 				intel_unpin_ringbuffer_obj(ringbuf);

@@ -996,6 +996,44 @@ i915_gem_execbuffer_retire_commands(struct drm_device *dev,
 	(void)__i915_add_request(ring, file, obj, NULL);
 }
 
+static int debugon = 0;
+
+void i915_batchbuffer_print_debug_off(void)
+{
+	debugon=0;
+}
+EXPORT_SYMBOL_GPL(i915_batchbuffer_print_debug_off);
+
+void i915_batchbuffer_print_debug_on(void)
+{
+	debugon=1;
+}
+EXPORT_SYMBOL_GPL(i915_batchbuffer_print_debug_on);
+
+static void i915_batchbuffer_print(struct drm_device *dev,
+               struct drm_i915_gem_object *obj,
+               unsigned long start,
+               unsigned long len)
+{
+	struct drm_i915_private *dev_priv;
+	int i;
+	u32 *mem;
+
+	if (!debugon)
+		return;
+
+	printk("batch buffer: start=0x%lx len=%lx\n", start, len);
+
+	dev_priv = dev->dev_private;
+
+	mem = io_mapping_map_wc(dev_priv->gtt.mappable,
+			start);
+
+	for (i = 0; i < len ; i += 16)
+		printk("%08x :  %08x %08x %08x %08x\n", i, mem[i / 4], mem[i/4+1], mem[i/4+2], mem[i/4+3]);
+	io_mapping_unmap(mem);
+}
+
 static int
 i915_reset_gen7_sol_offsets(struct drm_device *dev,
 			    struct intel_engine_cs *ring)
@@ -1197,6 +1235,7 @@ i915_gem_ringbuffer_submission(struct drm_device *dev, struct drm_file *file,
 			if (ret)
 				goto error;
 
+			i915_batchbuffer_print(dev, batch_obj, exec_start,exec_len);
 			ret = ring->dispatch_execbuffer(ring,
 							exec_start, exec_len,
 							flags);
@@ -1204,6 +1243,7 @@ i915_gem_ringbuffer_submission(struct drm_device *dev, struct drm_file *file,
 				goto error;
 		}
 	} else {
+		i915_batchbuffer_print(dev, batch_obj, exec_start,exec_len);
 		ret = ring->dispatch_execbuffer(ring,
 						exec_start, exec_len,
 						flags);
