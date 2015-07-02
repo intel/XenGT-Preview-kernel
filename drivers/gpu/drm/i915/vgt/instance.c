@@ -45,14 +45,14 @@ struct vgt_device *vmid_2_vgt_device(int vmid)
 	return NULL;
 }
 
-static int allocate_vgt_id(void)
+static int allocate_vgt_id(struct pgt_device *pdev)
 {
 	unsigned long bit_index;
 
 	ASSERT(vgt_id_alloc_bitmap != ~0UL)
 	do {
 		bit_index = ffz (vgt_id_alloc_bitmap);
-		if (bit_index >= VGT_MAX_VMS) {
+		if (bit_index >= (IS_BDW(pdev) ? VGT_MAX_VMS : VGT_MAX_VMS_HSW)) {
 			vgt_err("vGT: allocate_vgt_id() failed\n");
 			return -ENOSPC;
 		}
@@ -126,7 +126,7 @@ int create_vgt_instance(struct pgt_device *pdev, struct vgt_device **ptr_vgt, vg
 
 	atomic_set(&vgt->crashing, 0);
 
-	if ((rc = vgt->vgt_id = allocate_vgt_id()) < 0 )
+	if ((rc = vgt->vgt_id = allocate_vgt_id(pdev)) < 0 )
 		goto err2;
 
 	vgt->vm_id = vp.vm_id;
@@ -190,6 +190,9 @@ int create_vgt_instance(struct pgt_device *pdev, struct vgt_device **ptr_vgt, vg
 		cfg_space[VGT_REG_CFG_COMMAND] &= ~(_REGBIT_CFG_COMMAND_IO |
 						_REGBIT_CFG_COMMAND_MEMORY |
 						_REGBIT_CFG_COMMAND_MASTER);
+		/* Clear the bar upper 32bit and let hvmloader to assign the new value */
+		memset (&vgt->state.cfg_space[VGT_REG_CFG_SPACE_BAR0 + 4], 0, 4);
+		memset (&vgt->state.cfg_space[VGT_REG_CFG_SPACE_BAR1 + 4], 0, 4);
 	}
 
 	vgt_info("aperture: [0x%llx, 0x%llx] guest [0x%llx, 0x%llx] "
@@ -311,11 +314,13 @@ int create_vgt_instance(struct pgt_device *pdev, struct vgt_device **ptr_vgt, vg
 	*ptr_vgt = vgt;
 
 	/* initialize context scheduler infor */
-	if (event_based_qos)
-		vgt_init_sched_info(vgt);
+	vgt_init_sched_info(vgt);
 
 	if (shadow_tail_based_qos)
 		vgt_init_rb_tailq(vgt);
+
+	mutex_init(&vgt->stat.mmio_accounting_lock);
+	vgt->stat.mmio_accounting = false;
 
 	vgt->warn_untrack = 1;
 	return 0;
@@ -445,7 +450,6 @@ void vgt_release_instance(struct vgt_device *vgt)
 
 void vgt_reset_ppgtt(struct vgt_device *vgt, unsigned long ring_bitmap)
 {
-	struct vgt_mm *mm;
 	int bit;
 
 	if (!vgt->pdev->enable_ppgtt || !vgt->gtt.active_ppgtt_mm_bitmap)
@@ -461,8 +465,6 @@ void vgt_reset_ppgtt(struct vgt_device *vgt, unsigned long ring_bitmap)
 		if (!test_bit(bit, &vgt->gtt.active_ppgtt_mm_bitmap))
 			continue;
 
-		mm = vgt->rb[bit].active_ppgtt_mm;
-
 		vgt_info("VM %d: Reset ring %d PPGTT state.\n", vgt->vm_id, bit);
 
 		vgt->rb[bit].has_ppgtt_mode_enabled = 0;
@@ -470,9 +472,6 @@ void vgt_reset_ppgtt(struct vgt_device *vgt, unsigned long ring_bitmap)
 		vgt->rb[bit].ppgtt_page_table_level = 0;
 		vgt->rb[bit].ppgtt_root_pointer_type = GTT_TYPE_INVALID;
 
-		vgt_destroy_mm(mm);
-
-		vgt->rb[bit].active_ppgtt_mm = NULL;
 		clear_bit(bit, &vgt->gtt.active_ppgtt_mm_bitmap);
 	}
 
@@ -485,7 +484,6 @@ static void vgt_reset_ringbuffer(struct vgt_device *vgt, unsigned long ring_bitm
 	int bit;
 
 	for_each_set_bit(bit, &ring_bitmap, sizeof(ring_bitmap)) {
-		int i;
 		if (bit >= vgt->pdev->max_engines)
 			break;
 
@@ -497,14 +495,8 @@ static void vgt_reset_ringbuffer(struct vgt_device *vgt, unsigned long ring_bitm
 		rb->uhptr = 0;
 		rb->request_id = rb->uhptr_id = 0;
 
-		rb->el_slots_head = rb->el_slots_tail = 0;
-		for (i = 0; i < EL_QUEUE_SLOT_NUM; ++ i)
-			memset(&rb->execlist_slots[i], 0,
-				sizeof(struct vgt_exec_list));
-
 		memset(&rb->vring, 0, sizeof(vgt_ringbuffer_t));
 		memset(&rb->sring, 0, sizeof(vgt_ringbuffer_t));
-		rb->csb_write_ptr = DEFAULT_INV_SR_PTR;
 
 		vgt_disable_ring(vgt, bit);
 
@@ -527,7 +519,10 @@ void vgt_reset_virtual_states(struct vgt_device *vgt, unsigned long ring_bitmap)
 {
 	ASSERT(spin_is_locked(&vgt->pdev->lock));
 
-	vgt_reset_ringbuffer(vgt, ring_bitmap);
+	if (!vgt->pdev->enable_execlist)
+		vgt_reset_ringbuffer(vgt, ring_bitmap);
+	else
+		vgt_reset_execlist(vgt, ring_bitmap);
 
 	vgt_reset_ppgtt(vgt, ring_bitmap);
 

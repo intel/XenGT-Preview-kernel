@@ -102,6 +102,8 @@ enum vgt_debugfs_entry_t
 	VGT_DEBUGFS_FB_FORMAT,
 	VGT_DEBUGFS_DPY_INFO,
 	VGT_DEBUGFS_VIRTUAL_GTT,
+	VGT_DEBUGFS_HLIST_INFO,
+	VGT_DEBUGFS_MMIO_ACCOUNTING,
 	VGT_DEBUGFS_ENTRY_MAX
 };
 
@@ -727,6 +729,166 @@ static const struct file_operations virt_dpyinfo_fops = {
 	.release = single_release,
 };
 
+static void show_hlist_status(struct seq_file *m, struct hlist_head *head, int n_bucket)
+{
+	unsigned long count;
+	struct hlist_node *pos;
+	int i;
+
+	for (i = 0; i < n_bucket; i++) {
+		count = 0;
+		hlist_for_each(pos, head + i)
+			count++;
+		seq_printf(m, "[bucket %d] %lu elements\n", i, count);
+	}
+}
+
+static int show_hlist_info(struct seq_file *m, void *data)
+{
+	struct vgt_device *vgt = (struct vgt_device *)m->private;
+	struct pgt_device *pdev = vgt->pdev;
+	struct vgt_vgtt_info *gtt = &vgt->gtt;
+	int cpu;
+
+	vgt_lock_dev(pdev, cpu);
+
+	seq_printf(m, "------- guest page hash table -------\n");
+	show_hlist_status(m, gtt->guest_page_hash_table, 1 << VGT_HASH_BITS);
+	seq_printf(m, "------- shadow page hash table -------\n");
+	show_hlist_status(m, gtt->shadow_page_hash_table, 1 << VGT_HASH_BITS);
+
+	vgt_unlock_dev(pdev, cpu);
+
+	return 0;
+}
+
+static int hlist_info_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, show_hlist_info, inode->i_private);
+}
+
+static const struct file_operations hlist_info_fops = {
+	.open = hlist_info_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static int mmio_accounting_show(struct seq_file *m, void *data)
+{
+	struct vgt_device *vgt = (struct vgt_device *)m->private;
+	struct vgt_mmio_accounting_reg_stat *stat;
+	unsigned long count;
+
+	mutex_lock(&vgt->stat.mmio_accounting_lock);
+
+	if (!vgt->stat.mmio_accounting_reg_stats)
+		goto out;
+
+	seq_printf(m, "* MMIO read statistics *\n");
+	seq_printf(m, "------------------------\n");
+
+	for (count = 0; count < (2 * 1024 * 1024 / 4); count++) {
+		stat = &vgt->stat.mmio_accounting_reg_stats[count];
+		if (!stat->r_count)
+			continue;
+
+		seq_printf(m, "[ 0x%lx ]\t[ read ] count [ %llu ]\tcycles [ %llu ]\n", count * 4,
+			stat->r_count, stat->r_cycles);
+	}
+
+	seq_printf(m, "\n");
+
+	seq_printf(m, "* MMIO write statistics *\n");
+	seq_printf(m, "-------------------------\n");
+
+	for (count = 0; count < (2 * 1024 * 1024 / 4); count++) {
+		stat = &vgt->stat.mmio_accounting_reg_stats[count];
+		if (!stat->w_count)
+			continue;
+
+		seq_printf(m, "[ 0x%lx ]\t[ write ] count [ %llu ]\tcycles [ %llu ]\n", count * 4,
+			stat->w_count, stat->w_cycles);
+	}
+out:
+	mutex_unlock(&vgt->stat.mmio_accounting_lock);
+
+	return 0;
+}
+
+static int mmio_accounting_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, mmio_accounting_show, inode->i_private);
+}
+
+static ssize_t mmio_accounting_write(struct file *file,
+		const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct vgt_device *vgt = (struct vgt_device *)s->private;
+	struct pgt_device *pdev = vgt->pdev;
+	unsigned long flags;
+	char buf[32];
+
+	if (*ppos && count > sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+
+	mutex_lock(&vgt->stat.mmio_accounting_lock);
+
+	if (!strncmp(buf, "start", 5)) {
+		if (vgt->stat.mmio_accounting) {
+			vgt_err("mmio accounting has already started.\n");
+			goto out;
+		}
+
+		if (!vgt->stat.mmio_accounting_reg_stats) {
+			vgt->stat.mmio_accounting_reg_stats =
+				vzalloc(sizeof(struct vgt_mmio_accounting_reg_stat) * (2 * 1024 * 1024 / 4));
+			if (!vgt->stat.mmio_accounting_reg_stats) {
+				vgt_err("fail to allocate memory for mmio accounting.\n");
+				goto out;
+			}
+		}
+
+		spin_lock_irqsave(&pdev->lock, flags);
+		vgt->stat.mmio_accounting = true;
+		spin_unlock_irqrestore(&pdev->lock, flags);
+
+		vgt_info("VM %d start mmio accounting.\n", vgt->vm_id);
+	} else if (!strncmp(buf, "stop", 4)) {
+		spin_lock_irqsave(&pdev->lock, flags);
+		vgt->stat.mmio_accounting = false;
+		spin_unlock_irqrestore(&pdev->lock, flags);
+
+		vgt_info("VM %d stop mmio accounting.\n", vgt->vm_id);
+	} else if (!strncmp(buf, "clean", 5)) {
+		spin_lock_irqsave(&pdev->lock, flags);
+		vgt->stat.mmio_accounting = false;
+		spin_unlock_irqrestore(&pdev->lock, flags);
+
+		if (vgt->stat.mmio_accounting_reg_stats) {
+			vfree(vgt->stat.mmio_accounting_reg_stats);
+			vgt->stat.mmio_accounting_reg_stats = NULL;
+		}
+
+		vgt_info("VM %d stop and clean mmio accounting statistics.\n", vgt->vm_id);
+	}
+out:
+	mutex_unlock(&vgt->stat.mmio_accounting_lock);
+	return count;
+}
+
+static const struct file_operations mmio_accounting_fops = {
+	.open = mmio_accounting_open,
+	.write = mmio_accounting_write,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static int vgt_device_reset_show(struct seq_file *m, void *data)
 {
 	struct pgt_device *pdev = (struct pgt_device *)m->private;
@@ -858,6 +1020,43 @@ static const struct file_operations vgt_debug_fops = {
 	.release = single_release,
 };
 
+static int vgt_oos_page_info_show(struct seq_file *m, void *data)
+{
+	struct pgt_device *pdev = (struct pgt_device *)m->private;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pdev->lock, flags);
+
+	seq_printf(m, "current avail oos page count: %llu.\n",
+		pdev->stat.oos_page_cur_avail_cnt);
+	seq_printf(m, "minimum avail oos page count: %llu.\n",
+		pdev->stat.oos_page_min_avail_cnt);
+	seq_printf(m, "oos page steal count: %llu.\n",
+		pdev->stat.oos_page_steal_cnt);
+	seq_printf(m, "oos page attach count: %llu.\n",
+		pdev->stat.oos_page_attach_cnt);
+	seq_printf(m, "oos page detach count: %llu.\n",
+		pdev->stat.oos_page_detach_cnt);
+
+	spin_unlock_irqrestore(&pdev->lock, flags);
+
+	seq_printf(m, "\n");
+
+	return 0;
+}
+
+static int vgt_oos_page_info_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, vgt_oos_page_info_show, inode->i_private);
+}
+
+static const struct file_operations vgt_oos_page_info_fops = {
+	.open = vgt_oos_page_info_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static int vgt_el_status_show(struct seq_file *m, void *data)
 {
 	struct pgt_device *pdev = (struct pgt_device *)m->private;
@@ -932,6 +1131,11 @@ struct dentry *vgt_init_debugfs(struct pgt_device *pdev)
 
 	temp_d = debugfs_create_file("show_debug", 0444, d_vgt_debug,
 		pdev, &vgt_debug_fops);
+	if (!temp_d)
+		return NULL;
+
+	temp_d = debugfs_create_file("oos_page_info", 0444, d_vgt_debug,
+		pdev, &vgt_oos_page_info_fops);
 	if (!temp_d)
 		return NULL;
 
@@ -1076,6 +1280,22 @@ int vgt_create_debugfs(struct vgt_device *vgt)
 		printk("vGT(%d): create debugfs node: virtual_mmio_space\n", vgt_id);
 	/* end of virtual gtt space dump */
 
+	d_debugfs_entry[vgt_id][VGT_DEBUGFS_HLIST_INFO] = debugfs_create_file("hlistinfo",
+			0444, d_per_vgt[vgt_id], vgt, &hlist_info_fops);
+
+	if (!d_debugfs_entry[vgt_id][VGT_DEBUGFS_HLIST_INFO])
+		printk(KERN_ERR "vGT(%d): failed to create debugfs node: hlistinfo\n", vgt_id);
+	else
+		printk("vGT(%d): create debugfs node: hlistinfo\n", vgt_id);
+
+	d_debugfs_entry[vgt_id][VGT_DEBUGFS_MMIO_ACCOUNTING] = debugfs_create_file("mmio_accounting",
+			0444, d_per_vgt[vgt_id], vgt, &mmio_accounting_fops);
+
+	if (!d_debugfs_entry[vgt_id][VGT_DEBUGFS_MMIO_ACCOUNTING])
+		printk(KERN_ERR "vGT(%d): failed to create debugfs node: mmio_accounting\n", vgt_id);
+	else
+		printk("vGT(%d): create debugfs node: mmio_accounting\n", vgt_id);
+
 	d_debugfs_entry[vgt_id][VGT_DEBUGFS_FB_FORMAT] = debugfs_create_file("frame_buffer_format",
 			0444, d_per_vgt[vgt_id], vgt, &fbinfo_fops);
 
@@ -1116,8 +1336,18 @@ int vgt_create_debugfs(struct vgt_device *vgt)
 		debugfs_create_u64_node ("total_cmds", 0444, perf_dir_entry, &(vgt->total_cmds));
 		debugfs_create_u64_node ("vring_scan_cnt", 0444, perf_dir_entry, &(vgt->stat.vring_scan_cnt));
 		debugfs_create_u64_node ("vring_scan_cycles", 0444, perf_dir_entry, &(vgt->stat.vring_scan_cycles));
+		debugfs_create_u64_node ("wp_cnt", 0444, perf_dir_entry, &(vgt->stat.wp_cnt));
+		debugfs_create_u64_node ("wp_cycles", 0444, perf_dir_entry, &(vgt->stat.wp_cycles));
 		debugfs_create_u64_node ("ppgtt_wp_cnt", 0444, perf_dir_entry, &(vgt->stat.ppgtt_wp_cnt));
 		debugfs_create_u64_node ("ppgtt_wp_cycles", 0444, perf_dir_entry, &(vgt->stat.ppgtt_wp_cycles));
+		debugfs_create_u64_node ("spt_find_hit_cnt", 0444, perf_dir_entry, &(vgt->stat.spt_find_hit_cnt));
+		debugfs_create_u64_node ("spt_find_hit_cycles", 0444, perf_dir_entry, &(vgt->stat.spt_find_hit_cycles));
+		debugfs_create_u64_node ("spt_find_miss_cnt", 0444, perf_dir_entry, &(vgt->stat.spt_find_miss_cnt));
+		debugfs_create_u64_node ("spt_find_miss_cycles", 0444, perf_dir_entry, &(vgt->stat.spt_find_miss_cycles));
+		debugfs_create_u64_node ("gpt_find_hit_cnt", 0444, perf_dir_entry, &(vgt->stat.gpt_find_hit_cnt));
+		debugfs_create_u64_node ("gpt_find_hit_cycles", 0444, perf_dir_entry, &(vgt->stat.gpt_find_hit_cycles));
+		debugfs_create_u64_node ("gpt_find_miss_cnt", 0444, perf_dir_entry, &(vgt->stat.gpt_find_miss_cnt));
+		debugfs_create_u64_node ("gpt_find_miss_cycles", 0444, perf_dir_entry, &(vgt->stat.gpt_find_miss_cycles));
 		debugfs_create_u64_node ("skip_bb_cnt", 0444, perf_dir_entry, &(vgt->stat.skip_bb_cnt));
 
 		/* cmd statistics for ring/batch buffers */

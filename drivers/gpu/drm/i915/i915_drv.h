@@ -1795,6 +1795,8 @@ struct drm_i915_private {
 	} irq_ops;
 #endif
 
+	unsigned long value_of_0xfdc;
+
 	/* Abstract the submission mechanism (legacy ringbuffer or execlists) away */
 	struct {
 		int (*do_execbuf)(struct drm_device *dev, struct drm_file *file,

@@ -195,8 +195,13 @@ i915_gem_get_aperture_ioctl(struct drm_device *dev, void *data,
 			pinned += i915_gem_obj_ggtt_size(obj);
 	mutex_unlock(&dev->struct_mutex);
 
-	args->aper_size = dev_priv->gtt.base.total;
-	args->aper_available_size = args->aper_size - pinned;
+	if (!USES_VGT(ring->dev)) {
+		args->aper_size = dev_priv->gtt.base.total;
+		args->aper_available_size = args->aper_size - pinned;
+	} else {
+		args->aper_size = dev_priv->mm.vgt_low_gm_size + dev_priv->mm.vgt_high_gm_size;
+		args->aper_available_size = dev_priv->mm.vgt_low_gm_size + dev_priv->mm.vgt_high_gm_size - pinned;
+	}
 
 	return 0;
 }
@@ -3114,9 +3119,8 @@ int i915_vma_unbind(struct i915_vma *vma)
 
 	/* Since the unbound list is global, only move to that list if
 	 * no more VMAs exist. */
-	if (list_empty(&obj->vma_list)) {
-		if (!obj->has_vmfb_mapping)
-			i915_gem_gtt_finish_object(obj);
+	if (list_empty(&obj->vma_list) && !obj->has_vmfb_mapping) {
+		i915_gem_gtt_finish_object(obj);
 		list_move_tail(&obj->global_list, &dev_priv->mm.unbound_list);
 	}
 
@@ -4679,6 +4683,10 @@ struct i915_vma *i915_gem_obj_to_vma(struct drm_i915_gem_object *obj,
 void i915_gem_vma_destroy(struct i915_vma *vma)
 {
 	struct i915_address_space *vm = NULL;
+
+	if (vma->obj->has_vmfb_mapping)
+		vma->node.allocated = 0;
+
 	WARN_ON(vma->node.allocated);
 
 	/* Keep the vma as a placeholder in the execbuffer reservation lists */

@@ -498,9 +498,9 @@ static int vgt_hvm_vmem_init(struct vgt_device *vgt)
 	nr_high_4k_bkt = (info->vmem_sz >> PAGE_SHIFT);
 
 	info->vmem_vma_low_1mb =
-		kmalloc(sizeof(*info->vmem_vma) * nr_low_1mb_bkt, GFP_KERNEL);
+		vzalloc(sizeof(*info->vmem_vma) * nr_low_1mb_bkt);
 	info->vmem_vma =
-		kmalloc(sizeof(*info->vmem_vma) * nr_high_bkt, GFP_KERNEL);
+		vzalloc(sizeof(*info->vmem_vma) * nr_high_bkt);
 	info->vmem_vma_4k =
 		vzalloc(sizeof(*info->vmem_vma) * nr_high_4k_bkt);
 
@@ -566,8 +566,8 @@ static int vgt_hvm_vmem_init(struct vgt_device *vgt)
 
 	return 0;
 err:
-	kfree(info->vmem_vma);
-	kfree(info->vmem_vma_low_1mb);
+	vfree(info->vmem_vma);
+	vfree(info->vmem_vma_low_1mb);
 	vfree(info->vmem_vma_4k);
 	info->vmem_vma = info->vmem_vma_low_1mb = info->vmem_vma_4k = NULL;
 	return -ENOMEM;
@@ -619,8 +619,8 @@ static void vgt_vmem_destroy(struct vgt_device *vgt)
 			vgt->vm_id);
 	}
 
-	kfree(info->vmem_vma);
-	kfree(info->vmem_vma_low_1mb);
+	vfree(info->vmem_vma);
+	vfree(info->vmem_vma_low_1mb);
 	vfree(info->vmem_vma_4k);
 }
 
@@ -859,7 +859,7 @@ static int vgt_emulation_thread(void *priv)
 			ioreq = vgt_get_hvm_ioreq(vgt, vcpu);
 
 			if (vgt_hvm_do_ioreq(vgt, ioreq) ||
-					!vgt_expand_shadow_page_mempool(vgt)) {
+					!vgt_expand_shadow_page_mempool(vgt->pdev)) {
 				hypervisor_pause_domain(vgt);
 				hypervisor_shutdown_domain(vgt);
 			}

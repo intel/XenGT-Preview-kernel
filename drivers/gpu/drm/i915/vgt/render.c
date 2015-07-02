@@ -1319,6 +1319,7 @@ static struct reg_mask_t rcs_reset_mmio[] = {
 	{0x2044, 0},
 
 	{0x20a0, 0},
+	{0x20e4, 1},
 	{0x7004, 1},
 	{0x20dc, 1},
 
@@ -1682,7 +1683,6 @@ struct vgt_render_context_ops gen7_context_ops = {
 
 static struct reg_mask_t gen8_rcs_reset_mmio[] = {
 	{0x2098, 0},
-	{0x229c, 1},
 	{0x20c0, 1},
 
 	{0x24d0, 0},
@@ -1690,23 +1690,19 @@ static struct reg_mask_t gen8_rcs_reset_mmio[] = {
 	{0x24d8, 0},
 	{0x24dc, 0},
 
-	{0xe4f0, 0},
-	{0xe4f4, 0},
+#if 0
+	{0xe4f0, 1},
+	{0xe4f4, 1},
+	{0xe184, 1},
+#endif
 
-	{0xe184, 0},
-	{0x7300, 0},
+	{0x7300, 1},
 	{0x7004, 1},
 	{0x7008, 1},
 
 	{0x7000, 1},
-	{0x20e4, 1},
 
 	{0x7010, 1},
-
-	{0xb118, 0},
-	{0xb100, 0},
-	{0xb110, 0},
-	{0xb10c, 0},
 
 	{0x83a4, 1},
 };

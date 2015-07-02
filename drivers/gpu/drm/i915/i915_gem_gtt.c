@@ -32,8 +32,6 @@
 
 #define GEN6_PPGTT_PD_ENTRIES 512
 #define I915_PPGTT_PT_ENTRIES (PAGE_SIZE / sizeof(gen6_gtt_pte_t))
-typedef uint64_t gen8_gtt_pte_t;
-typedef gen8_gtt_pte_t gen8_ppgtt_pde_t;
 
 /* PPGTT stuff */
 #define GEN6_GTT_ADDR_ENCODE(addr)	((addr) | (((addr) >> 28) & 0xff0))
@@ -83,6 +81,10 @@ struct _balloon_info_ {
 	 */
 	struct drm_mm_node space[4];
 } bl_info;
+
+static void (*insert_vmfb_entries)(struct i915_address_space *vm,
+					   uint32_t num_pages,
+					   uint64_t start);
 
 static int i915_balloon_space(
 			struct drm_mm *mm,
@@ -557,6 +559,51 @@ static void gen8_ppgtt_clear_range(struct i915_address_space *vm,
 			pdpe++;
 			pde = 0;
 		}
+	}
+}
+
+static void gen8_ppgtt_insert_vmfb_entries(struct i915_address_space *vm,
+					   uint32_t num_pages,
+					   uint64_t start)
+{
+	struct i915_hw_ppgtt *ppgtt =
+		container_of(vm, struct i915_hw_ppgtt, base);
+	gen8_gtt_pte_t *pt_vaddr;
+	unsigned pdpe = start >> GEN8_PDPE_SHIFT & GEN8_PDPE_MASK;
+	unsigned pde = start >> GEN8_PDE_SHIFT & GEN8_PDE_MASK;
+	unsigned pte = start >> GEN8_PTE_SHIFT & GEN8_PTE_MASK;
+	unsigned first_entry = start >> PAGE_SHIFT;
+
+	pt_vaddr = NULL;
+
+	struct drm_i915_private *dev_priv = ppgtt->base.dev->dev_private;
+	uint64_t __iomem *vmfb_start = dev_priv->gtt.gsm;
+	vmfb_start += first_entry;
+
+	int i;
+	for (i = 0; i < num_pages; i++) {
+		if (pt_vaddr == NULL)
+			pt_vaddr = kmap_atomic(ppgtt->gen8_pt_pages[pdpe][pde]);
+
+		pt_vaddr[pte] = GTT_READ64(vmfb_start);
+		vmfb_start++;
+
+		if (++pte == GEN8_PTES_PER_PAGE) {
+			if (!HAS_LLC(ppgtt->base.dev))
+				drm_clflush_virt_range(pt_vaddr, PAGE_SIZE);
+			kunmap_atomic(pt_vaddr);
+			pt_vaddr = NULL;
+			if (++pde == GEN8_PDES_PER_PAGE) {
+				pdpe++;
+				pde = 0;
+			}
+			pte = 0;
+		}
+	}
+	if (pt_vaddr) {
+		if (!HAS_LLC(ppgtt->base.dev))
+			drm_clflush_virt_range(pt_vaddr, PAGE_SIZE);
+		kunmap_atomic(pt_vaddr);
 	}
 }
 
@@ -1176,8 +1223,7 @@ static void gen6_ppgtt_clear_range(struct i915_address_space *vm,
 
 static void gen6_ppgtt_insert_vmfb_entries(struct i915_address_space *vm,
 					   uint32_t num_pages,
-					   uint64_t start,
-					   unsigned vmfb_offset)
+					   uint64_t start)
 {
 	struct i915_hw_ppgtt *ppgtt =
 		container_of(vm, struct i915_hw_ppgtt, base);
@@ -1190,7 +1236,7 @@ static void gen6_ppgtt_insert_vmfb_entries(struct i915_address_space *vm,
 
 	struct drm_i915_private *dev_priv = ppgtt->base.dev->dev_private;
 	uint32_t __iomem *vmfb_start = dev_priv->gtt.gsm;
-	vmfb_start += vmfb_offset;
+	vmfb_start += first_entry;
 
 	int i;
 	for (i = 0; i < num_pages; i++) {
@@ -1548,10 +1594,9 @@ ppgtt_bind_vma(struct i915_vma *vma,
 		flags |= PTE_READ_ONLY;
 
 	if (vma->obj->has_vmfb_mapping)
-		gen6_ppgtt_insert_vmfb_entries(vma->vm,
-					       vma->obj->base.size >> PAGE_SHIFT,
-					       vma->node.start,
-					       i915_gem_obj_ggtt_offset(vma->obj) >> PAGE_SHIFT);
+		insert_vmfb_entries(vma->vm,
+				    vma->obj->base.size >> PAGE_SHIFT,
+				    vma->node.start);
 	else
 		vma->vm->insert_entries(vma->vm, vma->obj->pages, vma->node.start,
 					cache_level, flags);
@@ -1948,10 +1993,9 @@ static void ggtt_bind_vma(struct i915_vma *vma,
 	     (cache_level != obj->cache_level))) {
 		struct i915_hw_ppgtt *appgtt = dev_priv->mm.aliasing_ppgtt;
 		if (obj->has_vmfb_mapping)
-			gen6_ppgtt_insert_vmfb_entries(&appgtt->base,
-						       obj->base.size >> PAGE_SHIFT,
-						       vma->node.start,
-						       i915_gem_obj_ggtt_offset(obj) >> PAGE_SHIFT);
+			insert_vmfb_entries(&appgtt->base,
+					    obj->base.size >> PAGE_SHIFT,
+					    vma->node.start);
 		else
 			appgtt->base.insert_entries(&appgtt->base,
 							    vma->obj->pages,
@@ -2551,8 +2595,13 @@ static struct i915_vma *__i915_gem_vma_create(struct drm_i915_gem_object *obj,
 	switch (INTEL_INFO(vm->dev)->gen) {
 	case 9:
 	case 8:
+		if (vma->obj->has_vmfb_mapping && !insert_vmfb_entries)
+			insert_vmfb_entries = gen8_ppgtt_insert_vmfb_entries;
 	case 7:
 	case 6:
+		if (vma->obj->has_vmfb_mapping && !insert_vmfb_entries)
+			insert_vmfb_entries = gen6_ppgtt_insert_vmfb_entries;
+
 		if (i915_is_ggtt(vm)) {
 			vma->unbind_vma = ggtt_unbind_vma;
 			vma->bind_vma = ggtt_bind_vma;

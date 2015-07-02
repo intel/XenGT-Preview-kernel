@@ -23,6 +23,7 @@
 #include <linux/types.h>
 #include <linux/stringify.h>
 #include <linux/tracepoint.h>
+#include <asm/tsc.h>
 
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM vgt
@@ -60,11 +61,11 @@ TRACE_EVENT(vgt_mmio_rw,
 				__entry->bytes)
 );
 
-#define MAX_CMD_STR_LEN	200
+#define MAX_CMD_STR_LEN	256
 TRACE_EVENT(vgt_command,
-		TP_PROTO(u8 vm_id, u8 ring_id, u32 ip_gma, u32 *cmd_va, u32 cmd_len, bool ring_buffer_cmd),
+		TP_PROTO(u8 vm_id, u8 ring_id, u32 ip_gma, u32 *cmd_va, u32 cmd_len, bool ring_buffer_cmd, cycles_t cost_pre_cmd_handler, cycles_t cost_cmd_handler),
 
-		TP_ARGS(vm_id, ring_id, ip_gma, cmd_va, cmd_len, ring_buffer_cmd),
+		TP_ARGS(vm_id, ring_id, ip_gma, cmd_va, cmd_len, ring_buffer_cmd, cost_pre_cmd_handler, cost_cmd_handler),
 
 		TP_STRUCT__entry(
 			__field(u8, vm_id)
@@ -78,7 +79,7 @@ TRACE_EVENT(vgt_command,
 			__entry->vm_id = vm_id;
 			__entry->ring_id = ring_id;
 			__entry->cmd_str[0] = '\0';
-			snprintf(__entry->tmp_buf, MAX_CMD_STR_LEN, "VM(%d) Ring(%d): %s ip(%08x) ", vm_id, ring_id, ring_buffer_cmd ? "RB":"BB", ip_gma);
+			snprintf(__entry->tmp_buf, MAX_CMD_STR_LEN, "VM(%d) Ring(%d): %s ip(%08x) pre handler cost (%llu), handler cost (%llu) ", vm_id, ring_id, ring_buffer_cmd ? "RB":"BB", ip_gma, cost_pre_cmd_handler, cost_cmd_handler);
 			strcat(__entry->cmd_str, __entry->tmp_buf);
 			entry->i = 0;
 			while (cmd_len > 0) {
@@ -234,7 +235,7 @@ TRACE_EVENT(spt_change,
 		TP_printk("%s", __entry->buf)
 );
 
-TRACE_EVENT(guest_pt_change,
+TRACE_EVENT(gpt_change,
 		TP_PROTO(int vm_id, const char *tag, void *spt, int type, u64 v, unsigned long index),
 
 		TP_ARGS(vm_id, tag, spt, type, v, index),
@@ -246,6 +247,40 @@ TRACE_EVENT(guest_pt_change,
 		TP_fast_assign(
 			snprintf(__entry->buf, MAX_BUF_LEN, "VM%d [%s] spt %p type %d entry 0x%llx index 0x%lx\n",
 					vm_id, tag, spt, type, v, index);
+		),
+
+		TP_printk("%s", __entry->buf)
+);
+
+TRACE_EVENT(oos_change,
+		TP_PROTO(int vm_id, const char *tag, int page_id, void *gpt, int type),
+
+		TP_ARGS(vm_id, tag, page_id, gpt, type),
+
+		TP_STRUCT__entry(
+			__array(char, buf, MAX_BUF_LEN)
+		),
+
+		TP_fast_assign(
+			snprintf(__entry->buf, MAX_BUF_LEN, "VM%d [oos %s] page id %d gpt %p type %d\n",
+					vm_id, tag, page_id, gpt, type);
+		),
+
+		TP_printk("%s", __entry->buf)
+);
+
+TRACE_EVENT(oos_sync,
+		TP_PROTO(int vm_id, int page_id, void *gpt, int type, u64 v, unsigned long index),
+
+		TP_ARGS(vm_id, page_id, gpt, type, v, index),
+
+		TP_STRUCT__entry(
+			__array(char, buf, MAX_BUF_LEN)
+		),
+
+		TP_fast_assign(
+			snprintf(__entry->buf, MAX_BUF_LEN, "VM%d [oos sync] page id %d gpt %p type %d entry 0x%llx index 0x%lx\n",
+					vm_id, page_id, gpt, type, v, index);
 		),
 
 		TP_printk("%s", __entry->buf)

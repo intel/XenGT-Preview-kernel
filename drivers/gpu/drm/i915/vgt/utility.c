@@ -278,7 +278,14 @@ void common_show_ring_buffer(struct pgt_device *pdev, int ring_id, int bytes,
 	p_head &= RB_HEAD_OFF_MASK;
 	ring_len = _RING_CTL_BUF_SIZE(p_ctl);
 	p_contents = vgt_gma_to_va(vgt->gtt.ggtt_mm, p_start);
+	if (!p_contents) {
+		if (pdev->enable_execlist)
+			return;
 
+		printk("Looks this ring buffer doesn't belong to current render owner.\n");
+		printk("Try to dump it from aperture.\n");
+		p_contents = phys_aperture_vbase(pdev) + p_start;
+	}
 #define WRAP_OFF(off, size)			\
 	({					\
 		u64 val = off;			\

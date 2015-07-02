@@ -261,6 +261,30 @@ static inline bool valid_mmio_alignment(struct vgt_mmio_entry *mht,
 	return false;
 }
 
+static inline void mmio_accounting_read(struct vgt_device *vgt, unsigned long offset, cycles_t cycles)
+{
+	struct vgt_mmio_accounting_reg_stat *stat;
+
+	if (!vgt->stat.mmio_accounting)
+		return;
+
+	stat = &vgt->stat.mmio_accounting_reg_stats[offset >> 2];
+	stat->r_count++;
+	stat->r_cycles += cycles;
+}
+
+static inline void mmio_accounting_write(struct vgt_device *vgt, unsigned long offset, cycles_t cycles)
+{
+	struct vgt_mmio_accounting_reg_stat *stat;
+
+	if (!vgt->stat.mmio_accounting)
+		return;
+
+	stat = &vgt->stat.mmio_accounting_reg_stats[offset >> 2];
+	stat->w_count++;
+	stat->w_cycles += cycles;
+}
+
 /*
  * Emulate the VGT MMIO register read ops.
  * Return : true/false
@@ -345,6 +369,8 @@ bool vgt_emulate_read(struct vgt_device *vgt, uint64_t pa, void *p_data,int byte
 	t1 = get_cycles();
 	stat->mmio_rcnt++;
 	stat->mmio_rcycles += t1 - t0;
+
+	mmio_accounting_read(vgt, offset, t1 - t0);
 	return true;
 err_mmio:
 	vgt_unlock_dev_flags(pdev, cpu, flags);
@@ -381,6 +407,9 @@ bool vgt_emulate_write(struct vgt_device *vgt, uint64_t pa,
 		guest_page = vgt_find_guest_page(vgt, pa >> PAGE_SHIFT);
 		if (guest_page) {
 			rc = guest_page->handler(guest_page, pa, p_data, bytes);
+			t1 = get_cycles();
+			stat->wp_cycles += t1 - t0;
+			stat->wp_cnt++;
 			vgt_unlock_dev_flags(pdev, cpu, flags);
 			return rc;
 		}
@@ -465,6 +494,7 @@ bool vgt_emulate_write(struct vgt_device *vgt, uint64_t pa,
 	t1 = get_cycles();
 	stat->mmio_wcycles += t1 - t0;
 	stat->mmio_wcnt++;
+	mmio_accounting_write(vgt, offset, t1 - t0);
 	return true;
 err_mmio:
 	vgt_unlock_dev_flags(pdev, cpu, flags);

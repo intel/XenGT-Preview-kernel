@@ -481,6 +481,9 @@ struct parser_exec_state {
 	bool cmd_issue_irq;
 
 	struct cmd_info* info;
+
+	uint32_t *ip_buf_va;
+	void *ip_buf;
 };
 
 #define CMD_TAIL_NUM	1024

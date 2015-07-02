@@ -354,7 +354,7 @@ static bool gen6_gdrst_mmio_read(struct vgt_device *vgt, unsigned int offset,
 	return true;
 }
 
-static bool rrmr_mmio_write(struct vgt_device *vgt, unsigned int offset,
+bool vgt_rrmr_mmio_write(struct vgt_device *vgt, unsigned int offset,
 	void *p_data, unsigned int bytes)
 {
 	uint32_t old_rrmr, new_rrmr, new_physical_rrmr;
@@ -370,7 +370,7 @@ static bool rrmr_mmio_write(struct vgt_device *vgt, unsigned int offset,
 		VGT_MMIO_WRITE(pdev, offset, new_physical_rrmr);
 	}
 
-	vgt_info("RRMR: VM%d: old (%x), new (%x), new_physical (%x)\n",
+	vgt_dbg(VGT_DBG_DPY, "RRMR: VM%d: old (%x), new (%x), new_physical (%x)\n",
 		vgt->vm_id, old_rrmr, new_rrmr, new_physical_rrmr);
 	return true;
 }
@@ -685,6 +685,9 @@ static bool ring_pp_mode_write(struct vgt_device *vgt, unsigned int off,
 		vgt->rb[ring_id].has_execlist_enabled = ring_execlist;
 		vgt_info("EXECLIST %s on ring %d.\n",
 			(ring_execlist ? "enabling" : "disabling"), ring_id);
+
+		if (ring_execlist)
+			vgt_enable_ring(vgt, ring_id);
 	}
 
 	ring_ppgtt_mode(vgt, ring_id, off, mode);
@@ -1929,6 +1932,8 @@ static bool pvinfo_read(struct vgt_device *vgt, unsigned int offset,
 			 *   *((unsigned int *)p_data)) = VGT_V2G_SET_SW_CURSOR;
 			 */
 			break;
+		case vgt_info_off(vgt_caps):
+			break;
 		default:
 			invalid_read = true;
 			break;
@@ -2704,7 +2709,7 @@ reg_attr_t vgt_base_reg_info[] = {
 {0x42080, 4, F_DOM0, 0, D_HSW_PLUS, NULL, NULL},
 {0xc4040, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 
-{_REG_DE_RRMR, 4, F_VIRT, 0, D_ALL, NULL, rrmr_mmio_write},
+{_REG_DE_RRMR, 4, F_VIRT, 0, D_ALL, NULL, vgt_rrmr_mmio_write},
 
 {_REG_PIPEADSL, 4, F_DPY, 0, D_ALL, pipe_dsl_mmio_read, NULL},
 {_REG_PIPEACONF, 4, F_DPY, 0, D_ALL, NULL, pipe_conf_mmio_write},
@@ -3334,7 +3339,8 @@ reg_attr_t vgt_base_reg_info[] = {
 {0x7180, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 {0x7408, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 {0x7c00, 4, F_VIRT, 0, D_ALL, NULL, NULL},
-{_REG_SNPCR, 4, F_VIRT, 0, D_ALL, NULL, NULL},
+{_REG_SNPCR, 4, F_VIRT, 0, D_PRE_BDW, NULL, NULL},
+{_REG_SNPCR, 4, F_PT, 0, D_BDW_PLUS, NULL, NULL},
 {_REG_MBCTL, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 {0x911c, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 {0x9120, 4, F_VIRT, 0, D_ALL, NULL, NULL},
@@ -3356,7 +3362,8 @@ reg_attr_t vgt_base_reg_info[] = {
 {_REG_PCH_GMBUS5, 4, F_DPY, 0, D_ALL, NULL, NULL},
 
 {_REG_SUPER_QUEUE_CONFIG, 4, F_VIRT, 0, D_ALL, NULL, NULL},
-{_REG_MISC_CLOCK_GATING, 4, F_VIRT, 0, D_ALL, NULL, NULL},
+{_REG_MISC_CLOCK_GATING, 4, F_VIRT, 0, D_PRE_BDW, NULL, NULL},
+{_REG_MISC_CLOCK_GATING, 4, F_PT, 0, D_BDW_PLUS, NULL, NULL},
 {0xec008, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 {0xec00c, 4, F_VIRT, 0, D_ALL, NULL, NULL},
 {0xec008+0x18, 4, F_VIRT, 0, D_ALL, NULL, NULL},
@@ -3523,14 +3530,14 @@ reg_attr_t vgt_base_reg_info[] = {
 {0x66c00, 4, F_VIRT, 0, D_BDW_PLUS, NULL, NULL},
 {0x66c04, 4, F_VIRT, 0, D_BDW, NULL, NULL},
 
-{0x4024, 4, F_VIRT, 0, D_BDW, NULL, NULL},
+{0x4024, 4, F_DOM0, 0, D_BDW, NULL, NULL},
 
 {0x9134, 4, F_VIRT, 0, D_BDW, NULL, NULL},
 {0x9138, 4, F_VIRT, 0, D_BDW, NULL, NULL},
 {0x913c, 4, F_VIRT, 0, D_BDW, NULL, NULL},
 
 /* WA */
-{0xfdc, 4, F_VIRT, 0, D_BDW, NULL, NULL},
+{0xfdc, 4, F_DOM0, 0, D_BDW, NULL, NULL},
 {0xe4f0, 4, F_RDR, 0, D_BDW, NULL, NULL},
 {0xe4f4, 4, F_RDR, 0, D_BDW, NULL, NULL},
 {0x9430, 4, F_RDR, 0, D_BDW, NULL, NULL},
@@ -3541,7 +3548,7 @@ reg_attr_t vgt_base_reg_info[] = {
 {0xb118, 4, F_RDR, 0, D_BDW, NULL, NULL},
 {0xb100, 4, F_RDR, 0, D_BDW, NULL, NULL},
 {0xb10c, 4, F_RDR, 0, D_BDW, NULL, NULL},
-{0xb110, 4, F_RDR, 0, D_BDW, NULL, NULL},
+{0xb110, 4, F_PT, 0, D_BDW, NULL, NULL},
 
 /* NON-PRIV */
 {0x24d0, 4, F_RDR, 0, D_BDW, NULL, NULL},
@@ -3550,6 +3557,7 @@ reg_attr_t vgt_base_reg_info[] = {
 {0x24dc, 4, F_RDR, 0, D_BDW, NULL, NULL},
 
 {0x83a4, 4, F_RDR, 0, D_BDW, NULL, NULL},
+{0x4dd4, 4, F_RDR, 0, D_BDW, NULL, NULL},
 
 /* UCG */
 {0x8430, 4, F_PT, 0, D_BDW, NULL, NULL},
@@ -3642,9 +3650,6 @@ bool vgt_post_setup_mmio_hooks(struct pgt_device *pdev)
 		reg_update_handlers(pdev, _REG_VCS2_MFX_MODE_BDW, 4,
 				ring_pp_mode_read,
 				ring_pp_mode_write);
-
-		VGT_MMIO_WRITE(pdev, 0xfdc,
-				(1 << 28) | (1 << 24) | (1 << 25) | (1 << 26));
 	}
 
 	return true;

@@ -1019,35 +1019,39 @@ static void vgt_emulate_submit_execlist(struct vgt_device *vgt, int ring_id,
 
 	status.execlist_write_pointer = (el_index == 0 ? 1 : 0);
 
-	/* TODO
-	 * 1, Check whether we should set below two states. According to the observation
-	 * from dom0, when there is ELSP write, both active bit and valid bit will be
-	 * set.
-	 * 2, Consider the emulation of preemption and lite restore.
-	 * It is designed to be in context switch by adding corresponding status entries
-	 * into status buffer.
-	 */
-	if (el_index == 0) {
-		status.execlist_0_active = 1;
-		status.execlist_0_valid = 1;
-	} else {
-		status.execlist_1_active = 1;
-		status.execlist_1_valid = 1;
-	}
+	if (status.execlist_0_valid == 0 && status.execlist_1_valid == 0) {
 
-	/* TODO emulate the status. Need double confirm
-	 *
-	 * Here non-render owner will not receive context switch interrupt
-	 * until it becomes a render owner. Meanwhile, the status register
-	 * is emulated to reflect the port submission operation.
-	 * It is noticed that the initial value of "current_execlist_pointer"
-	 * and "execlist_write_pointer" does not equal although the EXECLISTS
-	 * are all empty. It is then not appropriate to emulate "execlist_queue_full"
-	 * with the two bit value. Instead, the "execlist_queue_full" will be
-	 * set if valid bits of both "EXECLIST 0" and "EXECLIST 1" are set.
-	 * This needs the double confirm.
-	 */
-	if (status.execlist_0_valid && status.execlist_1_valid) {
+		status.udw = ctx0->guest_context.context_id;
+
+		/* TODO
+		 * 1, Check whether we should set below two states. According to the observation
+		 * from dom0, when there is ELSP write, both active bit and valid bit will be
+		 * set.
+		 * 2, Consider the emulation of preemption and lite restore.
+		 * It is designed to be in context switch by adding corresponding status entries
+		 * into status buffer.
+		 */
+		if (el_index == 0) {
+			status.execlist_0_active = 1;
+			status.execlist_0_valid = 1;
+			status.execlist_1_active = 0;
+			status.execlist_1_valid = 0;
+		} else {
+			status.execlist_0_active = 0;
+			status.execlist_0_valid = 0;
+			status.execlist_1_active = 1;
+			status.execlist_1_valid = 1;
+		}
+		/*update cur pointer to next */
+		status.current_execlist_pointer = el_index;
+	}
+	else {
+		/* TODO emulate the status. Need double confirm
+		 *
+		 * Here non-render owner will still receive context switch interrupt
+		 * injected because of HW GPU status change. Meanwhile, the status register
+		 * is emulated to reflect the port submission operation.
+		 */
 		status.execlist_queue_full = 1;
 		vgt_dbg(VGT_DBG_EXECLIST,"VM-%d: ring(%d) EXECLISTS becomes "
 			"full due to workload submission!\n",
@@ -1057,6 +1061,8 @@ static void vgt_emulate_submit_execlist(struct vgt_device *vgt, int ring_id,
 
 	__vreg(vgt, status_reg) = status.ldw;
 	__vreg(vgt, status_reg + 4) = status.udw;
+
+	return;
 }
 
 struct execlist_context * execlist_context_find(struct vgt_device *vgt,
@@ -1096,40 +1102,6 @@ static inline void vgt_add_ctx_switch_status(struct vgt_device *vgt, enum vgt_ri
 	__vreg(vgt, offset + 4) = ctx_status->udw;
 
 	vgt->rb[ring_id].csb_write_ptr = write_idx;
-}
-
-static bool vgt_save_last_execlist_context(struct vgt_device *vgt,
-	enum vgt_ring_id ring_id, struct execlist_context *ctx)
-{
-	struct vgt_mm *mm = vgt->gtt.ggtt_mm;
-	void *dst = v_aperture(vgt->pdev, vgt->rb[ring_id].context_save_area);
-	u32 lrca = ctx->guest_context.lrca;
-	int nr_page = EXECLIST_CTX_PAGES(ring_id);
-	u32 *ring_context;
-	void *src;
-	int i;
-
-	if (ring_id != RING_BUFFER_RCS)
-		return true;
-
-	ring_context = vgt_gma_to_va(mm, (lrca + 1) << GTT_PAGE_SHIFT);
-	if (!ring_context) {
-		vgt_err("Fail to find ring_context, lrca %x.\n", lrca);
-		return false;
-	}
-
-	if (ring_context[1] != 0x1100101b) {
-		vgt_err("Not a valid guest context?!\n");
-		return false;
-	}
-
-	for (i = 1; i < nr_page; i++, dst += SIZE_PAGE) {
-		src = vgt_gma_to_va(mm, (lrca + i) << GTT_PAGE_SHIFT);
-		memcpy(dst, src, SIZE_PAGE);
-	}
-
-	vgt->has_context = 1;
-	return true;
 }
 
 static void vgt_emulate_context_status_change(struct vgt_device *vgt,
@@ -1179,9 +1151,6 @@ static void vgt_emulate_context_status_change(struct vgt_device *vgt,
 	} else {
 		goto emulation_done;
 	}
-
-	if (ctx_status->context_complete)
-		vgt_save_last_execlist_context(vgt, ring_id, el_ctx);
 
 	if (!vgt_require_shadow_context(vgt))
 		goto emulation_done;
@@ -1379,6 +1348,9 @@ static inline bool vgt_hw_ELSP_write(struct vgt_device *vgt,
 
 	ASSERT(ctx0 && ctx1);
 
+	ppgtt_check_partial_access(vgt);
+	ppgtt_sync_oos_pages(vgt);
+
 	vgt_dbg(VGT_DBG_EXECLIST, "EXECLIST is submitted into hardware! "
 			"Writing 0x%x with: 0x%x; 0x%x; 0x%x; 0x%x\n",
 			reg,
@@ -1445,11 +1417,25 @@ static void vgt_update_ring_info(struct vgt_device *vgt,
 	vgt->rb[ring_id].has_ppgtt_mode_enabled = 1;
 	vgt->rb[ring_id].has_ppgtt_base_set = 1;
 	vgt->rb[ring_id].request_id = el_ctx->request_id;
-	vgt->rb[ring_id].last_scan_head = el_ctx->last_scan_head;
-	if (!IS_PREEMPTION_RESUBMISSION(vring->head, vring->tail, el_ctx->last_scan_head)) {
+
+#if 0
+	/* keep this trace for debug purpose */
+	trace_printk("VRING: HEAD %04x TAIL %04x START %08x last_scan %08x PREEMPTION %d DPY %d\n",
+		vring->head, vring->tail, vring->start, el_ctx->last_scan_head,
+		IS_PREEMPTION_RESUBMISSION(vring->head, vring->tail,
+		el_ctx->last_scan_head), current_foreground_vm(vgt->pdev) == vgt);
+#endif
+	if (el_ctx->last_guest_head == vring->head) {
+		/* For lite-restore case from Guest, Headers are fixed,
+		 HW only resample tail */
 		vgt->rb[ring_id].last_scan_head = el_ctx->last_scan_head;
-		vgt_scan_vring(vgt, ring_id);
 	}
+	else {
+		vgt->rb[ring_id].last_scan_head = vring->head;
+		el_ctx->last_guest_head = vring->head;
+	}
+
+	vgt_scan_vring(vgt, ring_id);
 
 	/* the function is used to update ring/buffer only. No real submission inside */
 	vgt_submit_commands(vgt, ring_id);
@@ -1467,9 +1453,6 @@ void vgt_kick_off_execlists(struct vgt_device *vgt)
 	for (i = 0; i < pdev->max_engines; i ++) {
 		int j;
 		int num = vgt_el_slots_number(&vgt->rb[i]);
-
-		vgt->rb[i].check_uninitialized_context = true;
-
 		if (num == 2)
 			vgt_dbg(VGT_DBG_EXECLIST,
 				"VM(%d) Ring-%d: Preemption is met while "
@@ -1486,6 +1469,9 @@ bool vgt_idle_execlist(struct pgt_device *pdev, enum vgt_ring_id ring_id)
 	struct execlist_status_format el_status;
 	uint32_t ctx_ptr_reg;
 	struct ctx_st_ptr_format ctx_st_ptr;
+	struct context_status_format ctx_status;
+	uint32_t ctx_status_reg = el_ring_mmio(ring_id, _EL_OFFSET_STATUS_BUF);
+	unsigned long last_csb_reg_offset;
 
 	el_ring_base = vgt_ring_id_to_EL_base(ring_id);
 	el_status_reg = el_ring_base + _EL_OFFSET_STATUS;
@@ -1498,65 +1484,17 @@ bool vgt_idle_execlist(struct pgt_device *pdev, enum vgt_ring_id ring_id)
 	ctx_ptr_reg = el_ring_mmio(ring_id, _EL_OFFSET_STATUS_PTR);
 	ctx_st_ptr.dw = VGT_MMIO_READ(pdev, ctx_ptr_reg);
 
-	if (ctx_st_ptr.status_buf_write_ptr == DEFAULT_INV_SR_PTR
-			|| ctx_st_ptr.status_buf_read_ptr == DEFAULT_INV_SR_PTR)
+	if (ctx_st_ptr.status_buf_write_ptr == DEFAULT_INV_SR_PTR)
 		return true;
 
 	if (ctx_st_ptr.status_buf_read_ptr != ctx_st_ptr.status_buf_write_ptr)
 		return false;
 
-	return true;
-}
+	last_csb_reg_offset = ctx_status_reg + ctx_st_ptr.status_buf_write_ptr * 8;
+	READ_STATUS_MMIO(pdev, last_csb_reg_offset, ctx_status);
 
-static bool vgt_check_uninitialized_execlist_context(struct vgt_device *vgt,
-	enum vgt_ring_id ring_id, struct execlist_context *ctx)
-{
-	struct vgt_mm *mm = vgt->gtt.ggtt_mm;
-	void *src = v_aperture(vgt->pdev, vgt->rb[ring_id].context_save_area);
-	u32 lrca = ctx->guest_context.lrca;
-	int nr_page = EXECLIST_CTX_PAGES(ring_id);
-	u32 *ring_context;
-	u32 *ctx_sr_ctrl;
-	void *dst;
-	int i;
-
-	if (ring_id != RING_BUFFER_RCS
-			|| !vgt->rb[ring_id].check_uninitialized_context)
-		return true;
-
-	vgt->rb[ring_id].check_uninitialized_context = false;
-
-	if (!vgt->has_context)
-		return true;
-
-	ring_context = vgt_gma_to_va(mm, (lrca + 1) << GTT_PAGE_SHIFT);
-	if (!ring_context) {
-		vgt_err("Fail to find ring_context, lrca %x.\n", lrca);
+	if (!ctx_status.active_to_idle)
 		return false;
-	}
-
-	if (ring_context[1] != 0x1100101b && ring_context[2] != 0x2244) {
-		vgt_err("Not a valid guest context?!\n");
-		return false;
-	}
-
-	ctx_sr_ctrl = ring_context + 3;
-	if ((*ctx_sr_ctrl & ((1 << 16) | (1 << 0))) != ((1 << 16) | (1 << 0)))
-		return false;
-
-	*ctx_sr_ctrl &= ~((1 << 16) | (1 << 0));
-
-	/* Fill the engine context in page 1. */
-	memcpy(ring_context + 0x50, src + 0x50 * 4, SIZE_PAGE - 0x50 * 4);
-
-	src += SIZE_PAGE;
-
-	for (i = 2; i < nr_page; i++, src += SIZE_PAGE) {
-		dst = vgt_gma_to_va(mm, (lrca + i) << GTT_PAGE_SHIFT);
-		memcpy(dst, src, SIZE_PAGE);
-	}
-
-	vgt_info("fill uninitialized guest context with last context, lrca: %x.\n", lrca);
 
 	return true;
 }
@@ -1605,8 +1543,6 @@ void vgt_submit_execlist(struct vgt_device *vgt, enum vgt_ring_id ring_id)
 
 		trace_ctx_lifecycle(vgt->vm_id, ring_id,
 			ctx->guest_context.lrca, "schedule_to_run");
-
-		vgt_check_uninitialized_execlist_context(vgt, ring_id, ctx);
 
 		if (!vgt_require_shadow_context(vgt))
 			continue;
@@ -1664,7 +1600,6 @@ bool vgt_batch_ELSP_write(struct vgt_device *vgt, int ring_id)
 	ctx_descs[1] = (struct ctx_desc_format *)&elsp_store->element[0];
 
 	elsp_store->count = 0;
-	vgt_enable_ring(vgt, ring_id);
 
 	if (hvm_render_owner) {
 		uint32_t elsp_reg;
@@ -1818,4 +1753,31 @@ bool vgt_g2v_execlist_context_destroy(struct vgt_device *vgt)
 
 	vgt_destroy_execlist_context(vgt, el_ctx);
 	return rc;
+}
+
+void vgt_reset_execlist(struct vgt_device *vgt, unsigned long ring_bitmap)
+{
+	vgt_state_ring_t *rb;
+	int bit, i;
+
+	for_each_set_bit(bit, &ring_bitmap, sizeof(ring_bitmap)) {
+		if (bit >= vgt->pdev->max_engines)
+			break;
+
+		rb = &vgt->rb[bit];
+
+		memset(&rb->vring, 0, sizeof(vgt_ringbuffer_t));
+		memset(&rb->sring, 0, sizeof(vgt_ringbuffer_t));
+
+		vgt_disable_ring(vgt, bit);
+
+		memset(&rb->elsp_store, 0, sizeof(rb->elsp_store));
+
+		rb->el_slots_head = rb->el_slots_tail = 0;
+		for (i = 0; i < EL_QUEUE_SLOT_NUM; ++ i)
+			memset(&rb->execlist_slots[i], 0,
+					sizeof(struct vgt_exec_list));
+
+		rb->csb_write_ptr = DEFAULT_INV_SR_PTR;
+	}
 }

@@ -99,6 +99,9 @@ static void vlv_prepare_pll(struct intel_crtc *crtc,
 static void chv_prepare_pll(struct intel_crtc *crtc,
 			    const struct intel_crtc_config *pipe_config);
 
+static void page_flip_completed(struct intel_crtc *intel_crtc);
+static bool page_flip_finished(struct intel_crtc *crtc);
+
 static struct intel_encoder *intel_find_encoder(struct intel_connector *connector, int pipe)
 {
 	if (!connector->mst_port)
@@ -2912,6 +2915,15 @@ static bool intel_crtc_has_pending_flip(struct drm_crtc *crtc)
 
 	spin_lock_irq(&dev->event_lock);
 	pending = to_intel_crtc(crtc)->unpin_work != NULL;
+	/* Re-check the page flip status in vgt as in suspending
+	 * process flip done interrupt may be lost due to vgt_thread
+	 * is frozen before i915_pm_suspend.
+	 */
+	if (i915.enable_vgt && pending) {
+		pending = !page_flip_finished(intel_crtc);
+		if (!pending)
+			page_flip_completed(intel_crtc);
+	}
 	spin_unlock_irq(&dev->event_lock);
 
 	return pending;

@@ -75,12 +75,17 @@ enum vgt_v2g_type {
 	VGT_V2G_MAX,
 };
 
+enum vgt_caps_type {
+	VGT_CAPS_PREEMPTION = (1 << 0),
+};
+
 struct vgt_if {
     uint64_t  magic;      /* VGT_MAGIC */
     uint16_t  version_major;
     uint16_t  version_minor;
     uint32_t  vgt_id;       /* ID of vGT instance */
-    uint32_t  rsv2[12];	    /* pad to offset 0x40 */
+    uint32_t  vgt_caps;     /* VGT capabilties */
+    uint32_t  rsv2[11];	    /* pad to offset 0x40 */
     /*
      *  Data structure to describe the balooning info of resources.
      *  Each VM can only have one portion of continuous area for now.

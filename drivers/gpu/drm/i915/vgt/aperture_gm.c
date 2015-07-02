@@ -208,6 +208,7 @@ int allocate_vm_aperture_gm_and_fence(struct vgt_device *vgt, vgt_params_t vp)
 	unsigned long aperture_search_start = 0;
 	unsigned long visable_gm_start, hidden_gm_start = guard;
 	unsigned long fence_base;
+	int i=0;
 
 	ASSERT(vgt->aperture_base == 0); /* not allocated yet*/
 	ASSERT(vp.aperture_sz > 0 && vp.aperture_sz <= vp.gm_sz);
@@ -242,6 +243,13 @@ int allocate_vm_aperture_gm_and_fence(struct vgt_device *vgt, vgt_params_t vp)
 	if (vp.gm_sz > vp.aperture_sz)
 		bitmap_set(gm_bitmap, hidden_gm_start, vp.gm_sz - vp.aperture_sz);
 	bitmap_set(fence_bitmap, fence_base, vp.fence_sz);
+
+	for (i = vgt->fence_base; i < vgt->fence_base + vgt->fence_sz; i++){
+		VGT_MMIO_WRITE_BYTES(pdev,
+			_REG_FENCE_0_LOW + 8 * i,
+			0, 8);
+	}
+
 	return 0;
 }
 
@@ -253,6 +261,7 @@ void free_vm_aperture_gm_and_fence(struct vgt_device *vgt)
 	unsigned long visable_gm_start =
 		aperture_2_gm(vgt->pdev, vgt->aperture_base)/SIZE_1MB;
 	unsigned long hidden_gm_start = vgt->hidden_gm_offset/SIZE_1MB;
+	int i=0;
 
 	ASSERT(vgt->aperture_sz > 0 && vgt->aperture_sz <= vgt->gm_sz);
 
@@ -262,6 +271,12 @@ void free_vm_aperture_gm_and_fence(struct vgt_device *vgt)
 		bitmap_clear(gm_bitmap, hidden_gm_start,
 			(vgt->gm_sz - vgt->aperture_sz)/SIZE_1MB);
 	bitmap_clear(fence_bitmap, vgt->fence_base,  vgt->fence_sz);
+
+	for (i = vgt->fence_base; i < vgt->fence_base + vgt->fence_sz; i++){
+		VGT_MMIO_WRITE_BYTES(pdev,
+			_REG_FENCE_0_LOW + 8 * i,
+			0, 8);
+	}
 }
 
 int alloc_vm_rsvd_aperture(struct vgt_device *vgt)

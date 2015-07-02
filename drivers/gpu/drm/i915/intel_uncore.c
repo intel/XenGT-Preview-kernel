@@ -149,6 +149,9 @@ static void __gen7_gt_force_wake_mt_get(struct drm_i915_private *dev_priv,
 
 	/* WaRsForcewakeWaitTC0:ivb,hsw */
 	__gen6_gt_wait_for_thread_c0(dev_priv);
+
+	if (IS_BROADWELL(dev_priv->dev))
+		__raw_i915_write32(dev_priv, 0xfdc, dev_priv->value_of_0xfdc);
 }
 
 static void gen6_gt_check_fifodbg(struct drm_i915_private *dev_priv)
@@ -1192,6 +1195,29 @@ do { \
 	dev_priv->uncore.funcs.mmio_readq = x##_read64; \
 } while (0)
 
+void gen8_calc_value_of_0xfdc(struct drm_i915_private *dev_priv)
+{
+	unsigned long val_9120;
+	int bit;
+	unsigned long value = 0;
+
+	val_9120 = (__raw_i915_read32(dev_priv, 0x9120) >> 25) & 0x7;
+	for (bit = 0; bit < 3; bit++)
+		if ((val_9120 & (1 << bit)) && bit)
+			value |= (1 << (25 + bit));
+
+	val_9120 = (__raw_i915_read32(dev_priv, 0x9120) >> 21) & 0x7;
+	for (bit = 0; bit < 3; bit++)
+		if (!(val_9120 & (1 << bit)) && bit)
+			value |= (1 << (23 + bit));
+
+	value |= (1 << 28);
+
+	dev_priv->value_of_0xfdc = value;
+
+	DRM_INFO("value of 0xfdc: %lx.\n", dev_priv->value_of_0xfdc);
+}
+
 void intel_uncore_init(struct drm_device *dev)
 {
 	struct drm_i915_private *dev_priv = dev->dev_private;
@@ -1264,6 +1290,7 @@ void intel_uncore_init(struct drm_device *dev)
 		} else {
 			ASSIGN_WRITE_MMIO_VFUNCS(gen8);
 			ASSIGN_READ_MMIO_VFUNCS(gen6);
+			gen8_calc_value_of_0xfdc(dev_priv);
 		}
 		break;
 	case 7:

@@ -172,8 +172,33 @@ state_nodes = {
 		"count" : 1,
 		"cycles": 1,
 	},
-	"PPGTT writes" : {
+	"WP writes" : {
+		"node"	: "wp_",
+		"count" : 1,
+		"cycles": 1,
+	},
+	"PPGTT WP writes" : {
 		"node"	: "ppgtt_wp_",
+		"count" : 1,
+		"cycles": 1,
+	},
+	"PPGTT guest page find hit" : {
+		"node"	: "gpt_find_hit_",
+		"count" : 1,
+		"cycles": 1,
+	},
+	"PPGTT guest page find miss" : {
+		"node"	: "gpt_find_miss_",
+		"count" : 1,
+		"cycles": 1,
+	},
+	"PPGTT shadow page find hit" : {
+		"node"	: "spt_find_hit_",
+		"count" : 1,
+		"cycles": 1,
+	},
+	"PPGTT shadow page find miss" : {
+		"node"	: "spt_find_miss_",
 		"count" : 1,
 		"cycles": 1,
 	},
@@ -204,11 +229,6 @@ state_nodes = {
 	},
 	"CMD scans" : {
 		"node"	: "vring_scan_",
-		"count" : 1,
-		"cycles": 1,
-	},
-	"GP faults" : {
-		"node"	: "vgt_gp_",
 		"count" : 1,
 		"cycles": 1,
 	},
@@ -382,12 +402,15 @@ def show_result(e, s, r, time):
 		print_param2(e, vs, "MMIO writes", bias)
 		print_param2(e, vs, "GTT reads", bias)
 		print_param2(e, vs, "GTT writes", bias)
-		print_param2(e, vs, "PPGTT writes", bias)
+		print_param2(e, vs, "WP writes", bias)
+		print_param2(e, vs, "PPGTT WP writes", bias)
+		print_param2(e, vs, "PPGTT guest page find hit", bias)
+		print_param2(e, vs, "PPGTT guest page find miss", bias)
+		print_param2(e, vs, "PPGTT shadow page find hit", bias)
+		print_param2(e, vs, "PPGTT shadow page find miss", bias)
 		#print_param2(e, vs, "PM accesses", bias)
 		#print_param2(e, vs, "IRQ accesses", bias)
 		#print_param2(vs, "Emulations", freq, bias)
-		if id == 0:
-			print_param2(e, vs, "GP faults", 0)
 
 		print "----"
 		print_param2(e, vs, "Ring tail writes", bias)

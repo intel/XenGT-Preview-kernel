@@ -37,11 +37,10 @@ static void vgt_hrtimer_init(struct pgt_device *pdev,
 	struct vgt_hrtimer *hrtimer = &vgt_hrtimer;
 	hrtimer_init(&hrtimer->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 	hrtimer->timer.function = function;
-	hrtimer->period = period;
 	vgt_hrtimer_pdev = pdev;
 
 	hrtimer_start(&hrtimer->timer,
-			ktime_add_ns(ktime_get(), hrtimer->period),
+			ktime_add_ns(ktime_get(), period),
 			HRTIMER_MODE_ABS);
 }
 
@@ -114,7 +113,12 @@ static enum hrtimer_restart vgt_tbs_timer_fn(struct hrtimer *data)
 	if (vgt_nr_in_runq(pdev) > 1) {
 		vgt_raise_request(pdev, VGT_REQUEST_SCHED);
 	}
-	hrtimer_add_expires_ns(&hrtimer->timer, hrtimer->period);
+	/* we are safe to schedule next timeout with current vgt value
+	 * (before ctx switch). If ctx switch successfully, we will cancel
+	 * this timer and start new one with next vgt's tbs_period.
+	 */
+	hrtimer_add_expires_ns(&hrtimer->timer,
+		ctx_tbs_period(current_render_owner(pdev)));
 	return HRTIMER_RESTART;
 }
 
@@ -456,6 +460,7 @@ static enum hrtimer_restart vgt_poll_rb_tail(struct hrtimer *data)
 			struct vgt_hrtimer, timer);
 	struct pgt_device *pdev = vgt_hrtimer_pdev;
 	int cpu;
+	u64 hrtimer_period = VGT_TAILQ_RB_POLLING_PERIOD;
 
 	ASSERT(pdev);
 
@@ -490,11 +495,11 @@ reload_timer:
 	 */
 	if (vgt_removal_req == true) {
 		vgt_removal_req = false;
-		hrtimer->period = (VGT_TAILQ_RB_POLLING_PERIOD << 3);
+		hrtimer_period = (VGT_TAILQ_RB_POLLING_PERIOD << 3);
 	} else
-		hrtimer->period = VGT_TAILQ_RB_POLLING_PERIOD;
+		hrtimer_period = VGT_TAILQ_RB_POLLING_PERIOD;
 
-	hrtimer_add_expires_ns(&hrtimer->timer, hrtimer->period);
+	hrtimer_add_expires_ns(&hrtimer->timer, hrtimer_period);
 
 	return HRTIMER_RESTART;
 }
@@ -522,9 +527,10 @@ void vgt_initialize_ctx_scheduler(struct pgt_device *pdev)
 		timer_based_qos = false;
 
 	if (timer_based_qos) {
+		ASSERT(current_render_owner(pdev));
 		vgt_hrtimer_init(pdev,
 				vgt_tbs_timer_fn,
-				VGT_TBS_DEFAULT_PERIOD);
+				ctx_tbs_period(current_render_owner(pdev)));
 	}
 }
 
@@ -777,7 +783,7 @@ void vgt_sched_update_next(struct vgt_device *vgt)
 {
 	if (timer_based_qos)
 		hrtimer_start(&vgt_hrtimer.timer,
-			ktime_add_ns(ktime_get(), vgt_hrtimer.period),
+			ktime_add_ns(ktime_get(), ctx_tbs_period(vgt)),
 			HRTIMER_MODE_ABS);
 
 	/* setup countdown for next vgt context */
@@ -872,6 +878,6 @@ void vgt_request_force_removal(struct vgt_device *vgt)
 {
 	vgt->force_removal = 1;
 	vgt->pdev->next_sched_vgt = vgt_dom0;
-	vgt_raise_request(vgt->pdev, VGT_REQUEST_SCHED);
+	vgt_raise_request(vgt->pdev, VGT_REQUEST_CTX_SWITCH);
 	wmb();
 }

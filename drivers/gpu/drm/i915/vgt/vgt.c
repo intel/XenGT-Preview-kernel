@@ -77,6 +77,10 @@ bool event_based_qos = false;
 module_param_named(event_based_qos, event_based_qos, bool, 0600);
 MODULE_PARM_DESC(event_based_qos, "Use event based QoS scheduler (default: false)");
 
+int tbs_period_ms = -1;
+module_param_named(tbs_period_ms, tbs_period_ms, int, 0600);
+MODULE_PARM_DESC(event_based_qos, "Set the time based QoS scheduler timer in unit of ms (default: BDW 1ms, HSW 15ms)");
+
 bool shadow_tail_based_qos = false;
 module_param_named(shadow_tail_based_qos, shadow_tail_based_qos, bool, 0600);
 MODULE_PARM_DESC(shadow_tail_based_qos, "Use Shadow tail based QoS scheduler (default: false)");
@@ -96,6 +100,14 @@ MODULE_PARM_DESC(irq_based_ctx_switch, "Use user interrupt based context switch 
 int preallocated_shadow_pages = -1;
 module_param_named(preallocated_shadow_pages, preallocated_shadow_pages, int, 0600);
 MODULE_PARM_DESC(preallocated_shadow_pages, "Amount of pre-allocated shadow pages");
+
+int preallocated_oos_pages = -1;
+module_param_named(preallocated_oos_pages, preallocated_oos_pages, int, 0600);
+MODULE_PARM_DESC(preallocated_oos_pages, "Amount of pre-allocated oos pages");
+
+bool spt_out_of_sync = true;
+module_param_named(spt_out_of_sync, spt_out_of_sync, bool, 0600);
+MODULE_PARM_DESC(spt_out_of_sync, "Enable SPT out of sync");
 
 /*
  * FIXME: now video ring switch has weird issue. The cmd
@@ -134,6 +146,9 @@ module_param_named(bypass_scan, bypass_scan_mask, int, 0600);
 
 bool bypass_dom0_addr_check = false;
 module_param_named(bypass_dom0_addr_check, bypass_dom0_addr_check, bool, 0600);
+
+bool cmd_parser_ip_buf = true;
+module_param_named(cmd_parser_ip_buf, cmd_parser_ip_buf, bool, 0600);
 
 bool enable_panel_fitting = true;
 module_param_named(enable_panel_fitting, enable_panel_fitting, bool, 0600);
@@ -585,11 +600,6 @@ static bool vgt_initialize_platform(struct pgt_device *pdev)
 	/* this check is broken on SNB */
 	pdev->ring_xxx_valid = 0;
 
-	pdev->gtt.pte_ops = &gen7_gtt_pte_ops;
-	pdev->gtt.gma_ops = &gen7_gtt_gma_ops;
-	pdev->gtt.mm_alloc_page_table = gen7_mm_alloc_page_table;
-	pdev->gtt.mm_free_page_table = gen7_mm_free_page_table;
-
 	if (IS_HSW(pdev)) {
 		pdev->max_engines = 4;
 		pdev->ring_mmio_base[RING_BUFFER_VECS] = _REG_VECS_TAIL;
@@ -603,9 +613,6 @@ static bool vgt_initialize_platform(struct pgt_device *pdev)
 		pdev->ring_xxx_bit[RING_BUFFER_BCS] = 2;
 		pdev->ring_xxx_bit[RING_BUFFER_VECS] = 10;
 		pdev->ring_xxx_valid = 1;
-
-		if (preallocated_shadow_pages == -1)
-			preallocated_shadow_pages = 512;
 	} else if (IS_BDW(pdev)) {
 		pdev->max_engines = 4;
 		pdev->ring_mmio_base[RING_BUFFER_VECS] = _REG_VECS_TAIL;
@@ -622,14 +629,6 @@ static bool vgt_initialize_platform(struct pgt_device *pdev)
 			pdev->ring_xxx[RING_BUFFER_VCS2] = 0x8008;
 			pdev->ring_xxx_bit[RING_BUFFER_VCS2] = 0;
 		}
-
-		pdev->gtt.pte_ops = &gen8_gtt_pte_ops;
-		pdev->gtt.gma_ops = &gen8_gtt_gma_ops;
-		pdev->gtt.mm_alloc_page_table = gen8_mm_alloc_page_table;
-		pdev->gtt.mm_free_page_table = gen8_mm_free_page_table;
-
-		if (preallocated_shadow_pages == -1)
-			preallocated_shadow_pages = 8192;
 	} else {
 		vgt_err("Unsupported platform.\n");
 		return false;
@@ -686,6 +685,11 @@ static bool vgt_initialize_pgt_device(struct pci_dev *dev, struct pgt_device *pd
 	vgt_post_setup_mmio_hooks(pdev);
 	if (vgt_irq_init(pdev) != 0) {
 		printk("vGT: failed to initialize irq\n");
+		return false;
+	}
+
+	if (!vgt_gtt_init(pdev)) {
+		vgt_err("failed to initialize gtt\n");
 		return false;
 	}
 
@@ -795,15 +799,6 @@ static int vgt_initialize(struct pci_dev *dev)
 	vgt_init_fb_notify();
 
 	printk("vgt_initialize succeeds.\n");
-
-	/* FIXME
-	 * always enable forcewake. It was found that forcewake
-	 * operation is one of the stability issue for running
-	 * windows guest. Before having a decent fix, we will
-	 * always enable force wake for Broadwell.
-	 */
-	if (IS_BDW(pdev))
-		vgt_force_wake_get();
 
 	return 0;
 err:
@@ -1031,28 +1026,32 @@ static void do_device_reset(struct pgt_device *pdev)
 		ASSERT(0);
 	}
 
-	vgt_info("GPU ring status:\n");
+	if (IS_PREBDW(pdev)) {
+		vgt_info("GPU ring status:\n");
 
-	for (i = 0; i < pdev->max_engines; i++) {
-		head = VGT_READ_HEAD(pdev, i);
-		tail = VGT_READ_TAIL(pdev, i);
-		start = VGT_READ_START(pdev, i);
-		ctl = VGT_READ_CTL(pdev, i);
+		for (i = 0; i < pdev->max_engines; i++) {
+			head = VGT_READ_HEAD(pdev, i);
+			tail = VGT_READ_TAIL(pdev, i);
+			start = VGT_READ_START(pdev, i);
+			ctl = VGT_READ_CTL(pdev, i);
 
-		vgt_info("RING %d: H: %x T: %x S: %x C: %x.\n",
-				i, head, tail, start, ctl);
+			vgt_info("RING %d: H: %x T: %x S: %x C: %x.\n",
+					i, head, tail, start, ctl);
+		}
 
-		if (pdev->enable_execlist)
-			reset_el_structure(pdev, i);
+		ier = VGT_MMIO_READ(pdev, _REG_DEIER);
+		iir = VGT_MMIO_READ(pdev, _REG_DEIIR);
+		imr = VGT_MMIO_READ(pdev, _REG_DEIMR);
+		isr = VGT_MMIO_READ(pdev, _REG_DEISR);
+
+		vgt_info("DE: ier: %x iir: %x imr: %x isr: %x.\n",
+				ier, iir, imr, isr);
+	} else {
+		for (i = 0; i < pdev->max_engines; i++) {
+			if (pdev->enable_execlist)
+				reset_el_structure(pdev, i);
+		}
 	}
-
-	ier = VGT_MMIO_READ(pdev, _REG_DEIER);
-	iir = VGT_MMIO_READ(pdev, _REG_DEIIR);
-	imr = VGT_MMIO_READ(pdev, _REG_DEIMR);
-	isr = VGT_MMIO_READ(pdev, _REG_DEISR);
-
-	vgt_info("DE: ier: %x iir: %x imr: %x isr: %x.\n",
-			ier, iir, imr, isr);
 
 	vgt_info("Finish.\n");
 
@@ -1095,9 +1094,11 @@ bool vgt_handle_dom0_device_reset(void)
 
 int vgt_reset_device(struct pgt_device *pdev)
 {
+	struct vgt_irq_host_state *hstate = pdev->irq_hstate;
 	struct vgt_device *vgt;
 	struct list_head *pos, *n;
-	unsigned long ier;
+	unsigned long ier_reg = IS_PREBDW(pdev) ? _REG_DEIER : _REG_MASTER_IRQ;
+	unsigned long ier_value;
 	unsigned long flags;
 	int i;
 
@@ -1146,8 +1147,7 @@ int vgt_reset_device(struct pgt_device *pdev)
 
 	vgt_get_irq_lock(pdev, flags);
 
-	VGT_MMIO_WRITE(pdev, _REG_DEIER,
-			VGT_MMIO_READ(pdev, _REG_DEIER) & ~_REGBIT_MASTER_INTERRUPT);
+	hstate->ops->disable_irq(hstate);
 
 	vgt_put_irq_lock(pdev, flags);
 
@@ -1164,14 +1164,15 @@ int vgt_reset_device(struct pgt_device *pdev)
 
 	reset_cached_interrupt_registers(pdev);
 
-	ier = vgt_recalculate_ier(pdev, _REG_DEIER);
-	VGT_MMIO_WRITE(pdev, _REG_DEIER, ier);
+	ier_value = vgt_recalculate_ier(pdev, ier_reg);
+	VGT_MMIO_WRITE(pdev, ier_reg, ier_value);
 
 	vgt_put_irq_lock(pdev, flags);
 
 	spin_unlock_irqrestore(&pdev->lock, flags);
 
-	vgt_info("Enable master interrupt, DEIER: %lx\n", ier);
+	vgt_info("Enable master interrupt, master ier register %lx value %lx\n",
+			ier_reg, ier_value);
 
 	return 0;
 }

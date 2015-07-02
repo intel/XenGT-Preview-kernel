@@ -163,6 +163,12 @@ def get_reg_state(reg):
 	return out
 
 def show_reginfo():
+	if options.preg:
+		print "Get preg info..."
+		p_output = Popen(["cat", path_preg], stdout=PIPE)
+		print "Analyze preg info..."
+		preginfo = get_reginfo(p_output)
+
 	print "===================================="
 	print "Owner Type:"
 	print "\tNone, RDR(Render), DPY(Display), PM, MGMT(Management)"
@@ -181,14 +187,31 @@ def show_reginfo():
 	print "\tG - Accessed by GPU CMDs"
 	print "\tU - Tracked but unused"
 
-	print "\n%10s: %5s|%5s|%12s|%8s|%-8s" % ("Reg", "Owner", "Type", "Attributes", "State", "Name")
+	line = "\n%10s: %5s|%5s|%12s|%8s" % ("Reg", "Owner", "Type", "Attributes", "State")
+
+	if options.preg:
+		line += "|%10s" % "Preg"
+
+	line += "|%-8s" % "Name"
+
+	print line
+
 	print "------------------------------------"
 
 	i = 0
 	for reg in sorted(reginfo):
 		if not "Accessed" in reginfo[reg]:
 			continue
-		print "%10s: %5s|%5s|%12s|%8s|%s" % (hex(reg), reginfo[reg]["Owner"], reginfo[reg]["Type"], get_reg_attr(reginfo[reg]), get_reg_state(reginfo[reg]), reginfo[reg]["name"])
+
+		line = "%10s: %5s|%5s|%12s|%8s" % (hex(reg), reginfo[reg]["Owner"], reginfo[reg]["Type"], get_reg_attr(reginfo[reg]), get_reg_state(reginfo[reg]))
+
+		if options.preg:
+			line += "|%10s" % preginfo[reg]
+
+		line += "|%s" % reginfo[reg]["name"]
+
+		print line
+
 		i += 1
 	print "Total %d registers" % i
 	print "===================================="

@@ -51,7 +51,7 @@ static void vgt_add_cmd_entry(struct vgt_cmd_entry *e)
 	hash_add(vgt_cmd_table, &e->hlist, e->info->opcode);
 }
 
-static struct cmd_info* vgt_find_cmd_entry(unsigned int opcode, int ring_id)
+static inline struct cmd_info* vgt_find_cmd_entry(unsigned int opcode, int ring_id)
 {
 	struct vgt_cmd_entry *e;
 
@@ -117,7 +117,7 @@ static int get_next_entry(struct cmd_general_info *list)
 }
 
 /* TODO: support incremental patching */
-static int add_patch_entry(struct parser_exec_state *s,
+static inline int add_patch_entry(struct parser_exec_state *s,
 	void *addr, uint32_t val)
 {
 	vgt_state_ring_t *rs = &s->vgt->rb[s->ring_id];
@@ -139,8 +139,10 @@ static int add_patch_entry(struct parser_exec_state *s,
 	patch->addr = addr;
 	patch->new_val = val;
 
+#if 0
 	hypervisor_read_va(s->vgt, addr, &patch->old_val,
-				sizeof(patch->old_val), 1);
+			sizeof(patch->old_val), 1);
+#endif
 
 	patch->request_id = s->request_id;
 
@@ -148,7 +150,7 @@ static int add_patch_entry(struct parser_exec_state *s,
 	return 0;
 }
 
-static int add_post_handle_entry(struct parser_exec_state *s,
+static inline int add_post_handle_entry(struct parser_exec_state *s,
 	parser_cmd_handler handler)
 {
 	vgt_state_ring_t* rs = &s->vgt->rb[s->ring_id];
@@ -165,6 +167,12 @@ static int add_post_handle_entry(struct parser_exec_state *s,
 	entry = &list->handler[next];
 	/* two pages mapping are always valid */
 	memcpy(&entry->exec_state, s, sizeof(struct parser_exec_state));
+	/*
+	 * Do not use ip buf in post handle entry,
+	 * as ip buf has been freed at that time.
+	 * Switch back to guest memory write/read method
+	 */
+	entry->exec_state.ip_buf = entry->exec_state.ip_buf_va = NULL;
 	entry->handler = handler;
 	entry->request_id = s->request_id;
 
@@ -300,6 +308,7 @@ void apply_tail_list(struct vgt_device *vgt, int ring_id,
 				rs->uhptr &= ~_REGBIT_UHPTR_VALID;
 				VGT_MMIO_WRITE(pdev, VGT_UHPTR(ring_id), rs->uhptr);
 			}
+			ppgtt_sync_oos_pages(vgt);
 			VGT_WRITE_TAIL(pdev, ring_id, entry->tail);
 		}
 		list->head = next;
@@ -523,12 +532,24 @@ static inline uint32_t *cmd_ptr(struct parser_exec_state *s, int index)
 		return s->ip_va_next_page + (index - s->ip_buf_len);
 }
 
+static inline uint32_t *cmd_buf_ptr(struct parser_exec_state *s, int index)
+{
+	ASSERT(s->ip_buf_va);
+
+	return s->ip_buf_va + index;
+}
+
 static inline uint32_t cmd_val(struct parser_exec_state *s, int index)
 {
-	uint32_t *addr = cmd_ptr(s, index);
+	uint32_t *addr;
 	uint32_t ret = 0;
 
-	hypervisor_read_va(s->vgt, addr, &ret, sizeof(ret), 1);
+	if (s->ip_buf) {
+		ret = *cmd_buf_ptr(s, index);
+	} else {
+		addr = cmd_ptr(s, index);
+		hypervisor_read_va(s->vgt, addr, &ret, sizeof(ret), 1);
+	}
 
 	return ret;
 }
@@ -546,9 +567,26 @@ static void parser_exec_state_dump(struct parser_exec_state *s)
 	if (s->ip_va == NULL) {
 		vgt_err(" ip_va(NULL)\n");
 	} else {
+		int cnt = 0;
 		vgt_err("  ip_va=%p: %08x %08x %08x %08x \n",
 				s->ip_va, cmd_val(s, 0), cmd_val(s, 1), cmd_val(s, 2), cmd_val(s, 3));
+
 		vgt_print_opcode(cmd_val(s, 0), s->ring_id);
+
+		/* print the whole page to trace */
+		trace_printk("ERROR ip_va=%p: %08x %08x %08x %08x \n",
+				s->ip_va, cmd_val(s, 0), cmd_val(s, 1), cmd_val(s, 2), cmd_val(s, 3));
+
+		s->ip_va = (uint32_t*)((((u64)s->ip_va) >> 12) << 12);
+		while(cnt < 1024) {
+		trace_printk("DUMP ip_va=%p: %08x %08x %08x %08x %08x %08x %08x %08x \n",
+				s->ip_va, cmd_val(s, 0), cmd_val(s, 1), cmd_val(s, 2), cmd_val(s, 3),
+				          cmd_val(s, 4), cmd_val(s, 5), cmd_val(s, 6), cmd_val(s, 7));
+
+			s->ip_va+=8;
+			cnt+=8;
+		}
+
 	}
 }
 #define RING_BUF_WRAP(s, ip_gma)	(((s)->buf_type == RING_BUFFER_INSTRUCTION) && \
@@ -601,6 +639,14 @@ static int ip_gma_set(struct parser_exec_state *s, unsigned long ip_gma)
 		return -EFAULT;
 	}
 
+	if (s->ip_buf) {
+		hypervisor_read_va(s->vgt, s->ip_va, s->ip_buf,
+				s->ip_buf_len * sizeof(uint32_t), 1);
+		hypervisor_read_va(s->vgt, s->ip_va_next_page, s->ip_buf + s->ip_buf_len * sizeof(uint32_t),
+				PAGE_SIZE, 1);
+		s->ip_buf_va = s->ip_buf;
+	}
+
 	return 0;
 }
 
@@ -611,6 +657,8 @@ static inline int ip_gma_advance(struct parser_exec_state *s, unsigned int len)
 		/* not cross page, advance ip inside page */
 		s->ip_gma += len*sizeof(uint32_t);
 		s->ip_va += len;
+		if (s->ip_buf)
+			s->ip_buf_va += len;
 		s->ip_buf_len -= len;
 	} else {
 		/* cross page, reset ip_va */
@@ -665,6 +713,57 @@ static int vgt_cmd_handler_mi_set_context(struct parser_exec_state* s)
 	return 0;
 }
 
+/*
+ * Actually, we don't like to emulate register behavior in LRI handlers,
+ * But DE_RRMR is an exception, even we can modify i915 to access
+ * DE_RRMR via MMIO, the 2D driver will also access it via submitted
+ * batch buffer.
+ *
+ * So we have no choice and have to handle it here, as windows is
+ * using deferred filp from gen8+, MI_DISPLAY_FLIP and MI_WAIT_FOR_EVENT
+ * will not be in the same submission. If a i915 submission modify
+ * DE_RRMR after the filp submission, the wait submission of windows
+ * will hang as the needed events are disabled by i915. Only modify i915
+ * will not work, as 2D driver(xf86-video-intel) also modify it directly.
+ * */
+
+#define BIT_RANGE_MASK(a, b)	\
+	((1UL << ((a) + 1)) - (1UL << (b)))
+
+static int vgt_cmd_handler_lri_de_rrmr(struct parser_exec_state *s)
+{
+	int i;
+	int cmd_len = cmd_length(s);
+	unsigned long offset;
+	unsigned long val;
+
+	for (i = 1; i < cmd_len; i += 2) {
+		offset = cmd_val(s, i) & BIT_RANGE_MASK(22, 2);
+		val = cmd_val(s, i + 1);
+
+		if (offset == _REG_DE_RRMR)
+			break;
+	}
+
+	if (i == cmd_len) {
+		vgt_err("No DE_RRMR in LRI?");
+		return -EINVAL;
+	}
+
+	if (!vgt_rrmr_mmio_write(s->vgt, _REG_DE_RRMR, &val, 4)) {
+		vgt_err("fail to emulate register DE_RRMR!\n");
+		return -EINVAL;
+	}
+
+	if (add_patch_entry(s, cmd_ptr(s, i + 1),
+				VGT_MMIO_READ(s->vgt->pdev, _REG_DE_RRMR))) {
+		vgt_err("fail to patch DE_RRMR LRI.\n");
+		return -ENOSPC;
+	}
+
+	return 0;
+}
+
 static int cmd_reg_handler(struct parser_exec_state *s,
 	unsigned int offset, unsigned int index, char *cmd)
 {
@@ -706,16 +805,24 @@ reg_handle:
 
 	return 0;
 }
-#define BIT_RANGE_MASK(a, b)	\
-	((1UL << ((a) + 1)) - (1UL << (b)))
+
 static int vgt_cmd_handler_lri(struct parser_exec_state *s)
 {
+	unsigned long offset;
 	int i, rc = 0;
 	int cmd_len = cmd_length(s);
 
 	for (i = 1; i < cmd_len; i += 2) {
-		rc |= cmd_reg_handler(s,
-			cmd_val(s, i) & BIT_RANGE_MASK(22, 2), i, "lri");
+		offset = cmd_val(s, i) & BIT_RANGE_MASK(22, 2);
+		rc |= cmd_reg_handler(s, offset, i, "lri");
+
+		if (IS_BDW(s->vgt->pdev) && offset == _REG_DE_RRMR) {
+			rc = add_post_handle_entry(s, vgt_cmd_handler_lri_de_rrmr);
+			if (rc) {
+				vgt_err("fail to allocate post handle");
+				break;
+			}
+		}
 	}
 
 	return rc;
@@ -1186,7 +1293,7 @@ static int vgt_handle_mi_wait_for_event(struct parser_exec_state *s)
 static unsigned long get_gma_bb_from_cmd(struct parser_exec_state *s, int index)
 {
 	unsigned long addr;
-	int32_t gma_high, gma_low;
+	unsigned long gma_high, gma_low;
 	int gmadr_bytes = s->vgt->pdev->device_info.gmadr_bytes_in_cmd;
 
 	ASSERT(gmadr_bytes == 4 || gmadr_bytes == 8);
@@ -1203,7 +1310,7 @@ static unsigned long get_gma_bb_from_cmd(struct parser_exec_state *s, int index)
 	return addr;
 }
 
-static bool address_audit(struct parser_exec_state *s, int index)
+static inline bool address_audit(struct parser_exec_state *s, int index)
 {
 	int gmadr_bytes = s->vgt->pdev->device_info.gmadr_bytes_in_cmd;
 
@@ -1215,12 +1322,15 @@ static bool address_audit(struct parser_exec_state *s, int index)
 	return true;
 }
 
-static bool vgt_cmd_addr_audit_with_bitmap(struct parser_exec_state *s,
+static inline bool vgt_cmd_addr_audit_with_bitmap(struct parser_exec_state *s,
 			unsigned long addr_bitmap)
 {
 	unsigned int bit;
 	unsigned int delta = 0;
 	int cmd_len = cmd_length(s);
+
+	if (!addr_bitmap)
+		return true;
 
 	for_each_set_bit(bit, &addr_bitmap, sizeof(addr_bitmap)*8) {
 		if (bit + delta >= cmd_len)
@@ -2282,7 +2392,7 @@ static int cmd_hash_init(struct pgt_device *pdev)
 	return 0;
 }
 
-static void trace_cs_command(struct parser_exec_state *s)
+static void trace_cs_command(struct parser_exec_state *s, cycles_t cost_pre_cmd_handler, cycles_t cost_cmd_handler)
 {
 	/* This buffer is used by ftrace to store all commands copied from guest gma
 	* space. Sometimes commands can cross pages, this should not be handled in
@@ -2309,7 +2419,7 @@ static void trace_cs_command(struct parser_exec_state *s)
 		cmd_trace_buf[i] = cmd_val(s, i);
 
 	trace_vgt_command(s->vgt->vm_id, s->ring_id, s->ip_gma, cmd_trace_buf,
-			cmd_len, s->buf_type == RING_BUFFER_INSTRUCTION);
+			cmd_len, s->buf_type == RING_BUFFER_INSTRUCTION, cost_pre_cmd_handler, cost_cmd_handler);
 
 }
 
@@ -2319,8 +2429,11 @@ static int vgt_cmd_parser_exec(struct parser_exec_state *s)
 	struct cmd_info *info;
 	uint32_t cmd;
 	int rc = 0;
+	cycles_t t0, t1, t2;
 
-	hypervisor_read_va(s->vgt, s->ip_va, &cmd, sizeof(cmd), 1);
+	t0 = get_cycles();
+
+	cmd = cmd_val(s, 0);
 
 	info = vgt_get_cmd_info(cmd, s->ring_id);
 	if (info == NULL) {
@@ -2351,7 +2464,7 @@ static int vgt_cmd_parser_exec(struct parser_exec_state *s)
 	}
 	klog_printk("\n");
 #endif
-	trace_cs_command(s);
+	t1 = get_cycles();
 
 	if (info->handler) {
 		int post_handle = 0;
@@ -2378,6 +2491,10 @@ static int vgt_cmd_parser_exec(struct parser_exec_state *s)
 			return rc;
 		}
 	}
+
+	t2 = get_cycles();
+
+	trace_cs_command(s, t1 - t0, t2 -t1);
 
 	if (!(info->flag & F_IP_ADVANCE_CUSTOM)) {
 		rc = vgt_cmd_advance_default(s);
@@ -2434,9 +2551,18 @@ static int __vgt_scan_vring(struct vgt_device *vgt, int ring_id, vgt_reg_t head,
 		return 0;
 	}
 
+	if (cmd_parser_ip_buf) {
+		s.ip_buf = kmalloc(PAGE_SIZE * 2, GFP_ATOMIC);
+		if (!s.ip_buf) {
+			vgt_err("fail to allocate buffer page.\n");
+			return -ENOMEM;
+		}
+	} else
+		s.ip_buf = s.ip_buf_va = NULL;
+
 	rc = ip_gma_set(&s, base + head);
 	if (rc < 0)
-		return rc;
+		goto out;
 
 	klog_printk("ring buffer scan start on ring %d\n", ring_id);
 	vgt_dbg(VGT_DBG_CMD, "scan_start: start=%lx end=%lx\n", gma_head, gma_tail);
@@ -2483,6 +2609,9 @@ static int __vgt_scan_vring(struct vgt_device *vgt, int ring_id, vgt_reg_t head,
 
 	klog_printk("ring buffer scan end on ring %d\n", ring_id);
 	vgt_dbg(VGT_DBG_CMD, "scan_end\n");
+out:
+	if (s.ip_buf)
+		kfree(s.ip_buf);
 	return rc;
 }
 

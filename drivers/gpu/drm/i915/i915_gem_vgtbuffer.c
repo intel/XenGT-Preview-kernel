@@ -201,13 +201,12 @@ i915_gem_vgtbuffer_ioctl(struct drm_device *dev, void *data,
 
 	i915_gem_object_init(obj, &i915_gem_vgtbuffer_ops);
 	obj->cache_level = I915_CACHE_L3_LLC;
+	obj->has_vmfb_mapping = true;
+	obj->pages = NULL;
 
 	struct i915_address_space *ggtt_vm = &dev_priv->gtt.base;
 	struct i915_vma *vma = i915_gem_obj_lookup_or_create_vma(obj, ggtt_vm);
 	vma->node.start = gtt_offset;
-
-	obj->has_vmfb_mapping = true;
-	obj->pages = NULL;
 
 	ret = drm_gem_handle_create(file, &obj->base, &handle);
 	/* drop reference from allocate - handle holds it now */

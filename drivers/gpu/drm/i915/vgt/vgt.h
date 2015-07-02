@@ -90,6 +90,11 @@ extern bool wp_submitted_ctx;
 extern bool propagate_monitor_to_guest;
 extern bool irq_based_ctx_switch;
 extern int preallocated_shadow_pages;
+extern int preallocated_oos_pages;
+extern bool spt_out_of_sync;
+extern bool cmd_parser_ip_buf;
+extern bool timer_based_qos;
+extern int tbs_period_ms;
 
 enum vgt_event_type {
 	// GT
@@ -282,7 +287,8 @@ struct vgt_rsvd_ring {
 #define VGT_VBLANK_TIMEOUT	50	/* in ms */
 
 /* Maximum VMs supported by vGT. Actual number is device specific */
-#define VGT_MAX_VMS			4
+#define VGT_MAX_VMS_HSW 		4
+#define VGT_MAX_VMS			8
 #define VGT_RSVD_APERTURE_SZ		(32*SIZE_1MB)	/* reserve 8MB for vGT itself */
 
 #define GTT_PAGE_SHIFT		12
@@ -401,7 +407,6 @@ typedef struct {
 	struct vgt_exec_list execlist_slots[EL_QUEUE_SLOT_NUM];
 	struct vgt_elsp_store elsp_store;
 	int csb_write_ptr;
-	bool check_uninitialized_context;
 } vgt_state_ring_t;
 
 #define vgt_el_queue_head(vgt, ring_id) \
@@ -427,7 +432,7 @@ struct vgt_mmio_entry {
 	vgt_mmio_write	write;
 };
 
-#define	VGT_HASH_BITS	6
+#define	VGT_HASH_BITS	8
 
 /*
  * Ring ID definition.
@@ -604,21 +609,30 @@ extern void gen7_mm_free_page_table(struct vgt_mm *mm);
 extern bool gen8_mm_alloc_page_table(struct vgt_mm *mm);
 extern void gen8_mm_free_page_table(struct vgt_mm *mm);
 
+struct guest_page;
+
 struct vgt_vgtt_info {
 	struct vgt_mm *ggtt_mm;
 	unsigned long active_ppgtt_mm_bitmap;
 	struct list_head mm_list_head;
-	mempool_t *mempool;
 	DECLARE_HASHTABLE(shadow_page_hash_table, VGT_HASH_BITS);
 	DECLARE_HASHTABLE(guest_page_hash_table, VGT_HASH_BITS);
 	DECLARE_HASHTABLE(el_ctx_hash_table, VGT_HASH_BITS);
 	atomic_t n_write_protected_guest_page;
+	struct list_head oos_page_list_head;
+	int last_partial_ppgtt_access_index;
+	gtt_entry_t last_partial_ppgtt_access_entry;
+	struct guest_page *last_partial_ppgtt_access_gpt;
+	bool warn_partial_ppgtt_access_once;
 };
 
 extern bool vgt_init_vgtt(struct vgt_device *vgt);
 extern void vgt_clean_vgtt(struct vgt_device *vgt);
 
-extern bool vgt_expand_shadow_page_mempool(struct vgt_device *vgt);
+extern bool vgt_gtt_init(struct pgt_device *pdev);
+extern void vgt_gtt_clean(struct pgt_device *pdev);
+
+extern bool vgt_expand_shadow_page_mempool(struct pgt_device *pdev);
 
 extern bool vgt_g2v_create_ppgtt_mm(struct vgt_device *vgt, int page_table_level);
 extern bool vgt_g2v_destroy_ppgtt_mm(struct vgt_device *vgt, int page_table_level);
@@ -626,7 +640,11 @@ extern bool vgt_g2v_destroy_ppgtt_mm(struct vgt_device *vgt, int page_table_leve
 extern struct vgt_mm *gen8_find_ppgtt_mm(struct vgt_device *vgt,
                 int page_table_level, void *root_entry);
 
+extern bool ppgtt_check_partial_access(struct vgt_device *vgt);
+
 typedef bool guest_page_handler_t(void *gp, uint64_t pa, void *p_data, int bytes);
+
+struct oos_page;
 
 struct guest_page {
 	struct hlist_node node;
@@ -635,8 +653,20 @@ struct guest_page {
 	void *vaddr;
 	guest_page_handler_t *handler;
 	void *data;
+	unsigned long write_cnt;
+	struct oos_page *oos_page;
 };
+
 typedef struct guest_page guest_page_t;
+
+struct oos_page {
+	guest_page_t *guest_page;
+	struct list_head list;
+	struct list_head vm_list;
+	int id;
+	unsigned char mem[GTT_PAGE_SIZE];
+};
+typedef struct oos_page oos_page_t;
 
 typedef struct {
 	shadow_page_t shadow_page;
@@ -656,6 +686,7 @@ extern bool vgt_clear_guest_page_writeprotection(struct vgt_device *vgt,
 extern guest_page_t *vgt_find_guest_page(struct vgt_device *vgt, unsigned long gfn);
 
 extern bool gen7_ppgtt_mm_setup(struct vgt_device *vgt, int ring_id);
+bool ppgtt_sync_oos_pages(struct vgt_device *vgt);
 
 /* shadow context */
 
@@ -675,6 +706,7 @@ struct execlist_context {
 	 * data and store them into vgt->rb[ring_id] before a
 	 * context is submitted. We will have better handling later.
 	 */
+	vgt_reg_t last_guest_head;
 	vgt_reg_t last_scan_head;
 	uint64_t request_id;
 	//uint64_t cmd_nr;
@@ -726,6 +758,13 @@ extern void vgt_check_pending_context_switch(struct vgt_device *vgt);
 
 struct vgt_irq_virt_state;
 
+struct vgt_mmio_accounting_reg_stat {
+	u64 r_count;
+	u64 r_cycles;
+	u64 w_count;
+	u64 w_cycles;
+};
+
 struct vgt_statistics {
 	u64	schedule_in_time;	/* TSC time when it is last scheduled in */
 	u64	allocated_cycles;
@@ -757,9 +796,23 @@ struct vgt_statistics {
 	u64	ring_tail_mmio_wcycles;
 	u64	vring_scan_cnt;
 	u64	vring_scan_cycles;
+	u64	wp_cnt;
+	u64	wp_cycles;
 	u64	ppgtt_wp_cnt;
 	u64	ppgtt_wp_cycles;
+	u64	spt_find_hit_cnt;
+	u64	spt_find_hit_cycles;
+	u64	spt_find_miss_cnt;
+	u64	spt_find_miss_cycles;
+	u64	gpt_find_hit_cnt;
+	u64	gpt_find_hit_cycles;
+	u64	gpt_find_miss_cnt;
+	u64	gpt_find_miss_cycles;
 	u64	skip_bb_cnt;
+
+	struct vgt_mmio_accounting_reg_stat *mmio_accounting_reg_stats;
+	bool mmio_accounting;
+	struct mutex mmio_accounting_lock;
 };
 
 /* per-VM structure */
@@ -774,13 +827,15 @@ struct vgt_sched_info {
 	int32_t weight;
 	int64_t time_slice;
 	/* more properties and policies should be added in*/
+	u64 tbs_period;  /* default: VGT_TBS_DEFAULT_PERIOD(1ms) */
 };
 
-#define VGT_TBS_DEFAULT_PERIOD (15 * 1000000) /* 15 ms */
+#define VGT_TBS_PERIOD_MAX 15
+#define VGT_TBS_PERIOD_MIN 1
+#define VGT_TBS_DEFAULT_PERIOD(x) ((x) * 1000000) /* 15 ms */
 
 struct vgt_hrtimer {
 	struct hrtimer timer;
-	u64 period;
 };
 
 #define VGT_TAILQ_RB_POLLING_PERIOD (2 * 1000000)
@@ -1097,6 +1152,11 @@ struct pgt_statistics {
 	u64	virq_cycles;
 	u64	irq_delay_cycles;
 	u64	events[EVENT_MAX];
+	u64	oos_page_cur_avail_cnt;
+	u64	oos_page_min_avail_cnt;
+	u64	oos_page_steal_cnt;
+	u64	oos_page_attach_cnt;
+	u64	oos_page_detach_cnt;
 };
 
 #define PCI_BDF2(b,df)  ((((b) & 0xff) << 8) | ((df) & 0xff))
@@ -1134,6 +1194,10 @@ struct vgt_gtt_info {
 	struct vgt_gtt_gma_ops *gma_ops;
 	bool (*mm_alloc_page_table)(struct vgt_mm *mm);
 	void (*mm_free_page_table)(struct vgt_mm *mm);
+	mempool_t *mempool;
+	struct mutex mempool_lock;
+	struct list_head oos_page_use_list_head;
+	struct list_head oos_page_free_list_head;
 };
 
 /* per-device structure */
@@ -2099,6 +2163,7 @@ static inline unsigned long __REG_READ(struct pgt_device *pdev,
 #define ctx_remain_time(vgt) ((vgt)->sched_info.time_slice)
 #define ctx_actual_end_time(vgt) ((vgt)->sched_info.actual_end_time)
 #define ctx_rb_empty_delay(vgt) ((vgt)->sched_info.rb_empty_delay)
+#define ctx_tbs_period(vgt) ((vgt)->sched_info.tbs_period)
 
 #define vgt_get_cycles() ({		\
 	cycles_t __ret;				\
@@ -2153,11 +2218,35 @@ static inline int vgt_nr_in_runq(struct pgt_device *pdev)
 
 static inline void vgt_init_sched_info(struct vgt_device *vgt)
 {
-	ctx_remain_time(vgt) = VGT_DEFAULT_TSLICE;
-	ctx_start_time(vgt) = 0;
-	ctx_end_time(vgt) = 0;
-	ctx_actual_end_time(vgt) = 0;
-	ctx_rb_empty_delay(vgt) = 0;
+	if (event_based_qos) {
+		ctx_remain_time(vgt) = VGT_DEFAULT_TSLICE;
+		ctx_start_time(vgt) = 0;
+		ctx_end_time(vgt) = 0;
+		ctx_actual_end_time(vgt) = 0;
+		ctx_rb_empty_delay(vgt) = 0;
+	}
+
+	if (timer_based_qos) {
+
+		if (tbs_period_ms == -1) {
+			tbs_period_ms = IS_BDW(vgt->pdev) ?
+				VGT_TBS_PERIOD_MIN : VGT_TBS_PERIOD_MAX;
+		}
+
+		if (tbs_period_ms > VGT_TBS_PERIOD_MAX
+			|| tbs_period_ms < VGT_TBS_PERIOD_MIN) {
+			vgt_err("Invalid tbs_period=%d parameters. "
+				"Best value between <%d..%d>\n",
+				VGT_TBS_PERIOD_MIN, VGT_TBS_PERIOD_MAX,
+				tbs_period_ms);
+			tbs_period_ms = IS_BDW(vgt->pdev) ?
+				VGT_TBS_PERIOD_MIN : VGT_TBS_PERIOD_MAX;
+		}
+
+		ctx_tbs_period(vgt) = VGT_TBS_DEFAULT_PERIOD(tbs_period_ms);
+		vgt_info("VM-%d setup timebased schedule period %d ms\n",
+			vgt->vm_id, tbs_period_ms);
+	}
 }
 
 /* main context scheduling process */
@@ -2623,6 +2712,7 @@ static inline void vgt_set_all_vreg_bit(struct pgt_device *pdev, unsigned int va
 
 void vgt_reset_virtual_states(struct vgt_device *vgt, unsigned long ring_bitmap);
 void vgt_reset_ppgtt(struct vgt_device *vgt, unsigned long ring_bitmap);
+void vgt_reset_execlist(struct vgt_device *vgt, unsigned long ring_bitmap);
 
 enum vgt_pipe get_edp_input(uint32_t wr_data);
 void vgt_forward_events(struct pgt_device *pdev);
@@ -2635,6 +2725,9 @@ int vgt_irq_init(struct pgt_device *pgt);
 void vgt_irq_exit(struct pgt_device *pgt);
 
 void vgt_inject_flip_done(struct vgt_device *vgt, enum vgt_pipe pipe);
+
+bool vgt_rrmr_mmio_write(struct vgt_device *vgt, unsigned int offset,
+        void *p_data, unsigned int bytes);
 
 void vgt_trigger_virtual_event(struct vgt_device *vgt,
 	enum vgt_event_type event);

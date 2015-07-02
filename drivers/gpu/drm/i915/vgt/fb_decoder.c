@@ -399,8 +399,8 @@ int vgt_decode_fb_format(int vmid, struct vgt_fb_format *fb)
 	if (!fb)
 		return -EINVAL;
 
-	if (!IS_HSW(pdev)) {
-		vgt_err("Only HSW is supported now\n");
+	if (!IS_HSW(pdev) && !IS_BDW(pdev)) {
+		vgt_err("Only HSW or BDW supported now\n");
 		return -EINVAL;
 	}
 
